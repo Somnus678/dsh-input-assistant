@@ -1,7 +1,7 @@
 # DSH 输入助手
 
 [![CI](https://github.com/Somnus678/dsh-input-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/Somnus678/dsh-input-assistant/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/badge/version-0.1.2-blue)](CHANGELOG.md)
+[![release](https://img.shields.io/badge/release-v0.1.2-blue)](https://github.com/Somnus678/dsh-input-assistant/releases/tag/v0.1.2)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![dsh](https://img.shields.io/badge/DSH-0.2.1--rc.2-purple)](https://github.com/deepseek-ai/deepseek-harness)
 [![tests](https://img.shields.io/badge/tests-121%20passed-brightgreen)](docs/validation.md)
