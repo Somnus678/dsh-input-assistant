@@ -1,0 +1,424 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-22T13:59:09.446Z",
+  "dataKind": "synthetic",
+  "modelCallsByThisTool": 0,
+  "candidate": {
+    "groups": [
+      {
+        "operation": "optimize",
+        "total": 20,
+        "recorded": 0,
+        "reviewed": 0,
+        "expectedText": 20,
+        "usableText": 0,
+        "expectedAbstentions": 0,
+        "correctAbstentions": 0,
+        "displayed": 0,
+        "structuralFailures": 0,
+        "unsupportedAdditions": 0,
+        "meanEditCharacters": null,
+        "latencyP50Ms": null,
+        "latencyP95Ms": null,
+        "status": "not_evaluated"
+      },
+      {
+        "operation": "next",
+        "total": 20,
+        "recorded": 0,
+        "reviewed": 0,
+        "expectedText": 12,
+        "usableText": 0,
+        "expectedAbstentions": 8,
+        "correctAbstentions": 0,
+        "displayed": 0,
+        "structuralFailures": 0,
+        "unsupportedAdditions": 0,
+        "meanEditCharacters": null,
+        "latencyP50Ms": null,
+        "latencyP95Ms": null,
+        "status": "not_evaluated"
+      },
+      {
+        "operation": "complete",
+        "total": 20,
+        "recorded": 0,
+        "reviewed": 0,
+        "expectedText": 12,
+        "usableText": 0,
+        "expectedAbstentions": 8,
+        "correctAbstentions": 0,
+        "displayed": 0,
+        "structuralFailures": 0,
+        "unsupportedAdditions": 0,
+        "meanEditCharacters": null,
+        "latencyP50Ms": null,
+        "latencyP95Ms": null,
+        "status": "not_evaluated"
+      }
+    ],
+    "cases": [
+      {
+        "id": "next-01",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-02",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-03",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-04",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-05",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-06",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-07",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-08",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-09",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-10",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-11",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-12",
+        "operation": "next",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "next-13",
+        "operation": "next",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "next-14",
+        "operation": "next",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "next-15",
+        "operation": "next",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "next-16",
+        "operation": "next",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "next-17",
+        "operation": "next",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "next-18",
+        "operation": "next",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "next-19",
+        "operation": "next",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "next-20",
+        "operation": "next",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "complete-01",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-02",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-03",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-04",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-05",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-06",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-07",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-08",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-09",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-10",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-11",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-12",
+        "operation": "complete",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "complete-13",
+        "operation": "complete",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "complete-14",
+        "operation": "complete",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "complete-15",
+        "operation": "complete",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "complete-16",
+        "operation": "complete",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "complete-17",
+        "operation": "complete",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "complete-18",
+        "operation": "complete",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "complete-19",
+        "operation": "complete",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "complete-20",
+        "operation": "complete",
+        "expectation": "abstain",
+        "recorded": false
+      },
+      {
+        "id": "optimize-01",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-02",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-03",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-04",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-05",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-06",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-07",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-08",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-09",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-10",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-11",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-12",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-13",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-14",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-15",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-16",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-17",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-18",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-19",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      },
+      {
+        "id": "optimize-20",
+        "operation": "optimize",
+        "expectation": "text",
+        "recorded": false
+      }
+    ],
+    "status": "not_evaluated"
+  }
+}

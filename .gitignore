@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output (produced by `pnpm build`; not committed)
+lib/
+dist/
+
+# Test artifacts
+coverage/
+test-results/
+playwright-report/
+.test-runtime/
+*.log
+
+# Research material (third-party reference sources, not part of the MIT project)
+.research/
+
+# Migration-archive metadata and audit tools (private backup only)
+.archive/
+MIGRATION-VERIFIED.json
+MIGRATION.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local env
+.env
+.env.local

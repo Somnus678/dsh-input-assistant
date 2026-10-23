@@ -1,0 +1,236 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Full suite on Windows: the only environment where every test can run.
+  #
+  # tests/browser-theme.test.ts and scripts/smoke-web.mjs launch
+  # `chromium.launch({ channel: 'msedge' })`, i.e. the real Microsoft Edge that
+  # ships with Windows. They are genuine rendering tests against the published
+  # DSH theme, so they must not be skipped or mocked on the platform that can
+  # run them. `windows-latest` includes Edge.
+  # ---------------------------------------------------------------------------
+  test-windows:
+    name: Test (Windows, full suite)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      # host-package.test.ts is skipped unless dist/*.tgz exists; packing first
+      # makes it exercise the published archive through the official Loader.
+      - name: Pack release artifact
+        run: pnpm pack --pack-destination dist
+
+      - name: Verify packaged artifact
+        run: pnpm test:package
+
+      - name: Test
+        run: pnpm test
+
+      - name: Real-browser smoke test (Microsoft Edge)
+        run: pnpm test:web
+
+      - name: Validate evaluation fixtures
+        run: pnpm eval:validate
+
+      - name: Confirm build is reproducible
+        shell: pwsh
+        run: |
+          $before = (Get-FileHash lib/index.js -Algorithm SHA256).Hash
+          pnpm build
+          $after = (Get-FileHash lib/index.js -Algorithm SHA256).Hash
+          if ($before -ne $after) {
+            Write-Error "Build is not reproducible: lib/index.js changed between two builds"
+            exit 1
+          }
+          Write-Output "Reproducible build confirmed: $before"
+
+      - name: Upload packaged plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-input-assistant-tgz
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Cross-platform check on Linux.
+  #
+  # Everything except the Edge-dependent rendering tests is platform-neutral.
+  # Running it on Linux catches accidental Windows-only assumptions in the
+  # core, host and controller code. The theme test is excluded here on purpose
+  # (no Edge), and the coverage of that exclusion is provided by test-windows.
+  # ---------------------------------------------------------------------------
+  test-linux:
+    name: Test (Linux, excluding Edge-only tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Pack release artifact
+        run: pnpm pack --pack-destination dist
+
+      - name: Verify packaged artifact
+        run: pnpm test:package
+
+      - name: Test (excluding Edge-only rendering tests)
+        run: pnpm vitest run --exclude 'tests/browser-theme.test.ts'
+
+      - name: Validate evaluation fixtures
+        run: pnpm eval:validate
+
+  # ---------------------------------------------------------------------------
+  # Packaging sanity: the published tarball must contain exactly the expected
+  # files and must not leak research material, runtime caches or fixtures.
+  # ---------------------------------------------------------------------------
+  package:
+    name: Package contents
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Pack and verify
+        run: |
+          pnpm pack --pack-destination dist
+          pnpm test:package
+
+      - name: Assert no private material ships in the tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          tgz=$(ls dist/*.tgz | head -n1)
+          echo "Inspecting $tgz"
+          listing=$(tar -tzf "$tgz")
+          echo "$listing"
+          fail=0
+          for forbidden in node_modules .research .test-runtime .archive MIGRATION.md; do
+            if echo "$listing" | grep -q "$forbidden"; then
+              echo "::error::Forbidden path in tarball: $forbidden"
+              fail=1
+            fi
+          done
+          if echo "$listing" | grep -q 'evaluation/cases'; then
+            echo "::error::Evaluation fixtures must not ship in the tarball"
+            fail=1
+          fi
+          # Required entries.
+          for required in package/package.json package/cordis.patch.yml package/lib/index.js package/lib/client.js package/lib/core.js package/README.md package/LICENSE; do
+            if ! echo "$listing" | grep -qx "$required"; then
+              echo "::error::Missing required file: $required"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Assert no private material is tracked by git
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Authoritative check: what git actually tracks, not what happens to be
+          # on disk. Test runs create .test-runtime/ and install creates
+          # node_modules/, both gitignored, so a filesystem check would be wrong.
+          tracked=$(git ls-files)
+          fail=0
+          for forbidden in '.archive/' '.research/' '.test-runtime/' 'node_modules/' 'MIGRATION.md' 'MIGRATION-VERIFIED.json'; do
+            if echo "$tracked" | grep -q "^$forbidden"; then
+              echo "::error::Private material is tracked by git: $forbidden"
+              fail=1
+            fi
+          done
+          if echo "$tracked" | grep -qE '(^|/)\.env(\.local)?$'; then
+            echo "::error::Environment file is tracked by git"
+            fail=1
+          fi
+          if echo "$tracked" | grep -qE '\.(tgz|zip)$'; then
+            echo "::error::Build archives must not be committed; attach them to a Release instead"
+            fail=1
+          fi
+          exit $fail
+
+      - name: Assert required repository files are tracked
+        shell: bash
+        run: |
+          set -euo pipefail
+          tracked=$(git ls-files)
+          fail=0
+          for required in \
+            package.json pnpm-lock.yaml pnpm-workspace.yaml \
+            tsconfig.json tsconfig.build.json vitest.config.ts \
+            cordis.patch.yml README.md LICENSE .gitignore \
+            .github/workflows/ci.yml; do
+            if ! echo "$tracked" | grep -qx "$required"; then
+              echo "::error::Required file is not tracked by git: $required"
+              fail=1
+            fi
+          done
+          exit $fail
