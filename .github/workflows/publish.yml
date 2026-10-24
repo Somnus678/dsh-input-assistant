@@ -1,0 +1,56 @@
+name: Publish to npm
+
+# Publishes the current package.json version to the npm registry.
+# Triggered by:
+#   - pushing a v* tag (normal release flow)
+#   - manual dispatch (Actions page / API), e.g. to publish an already
+#     versioned but not-yet-on-npm release
+# Requires the repository secret NPM_TOKEN (a granular npm token with
+# Read and write on packages).
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+          registry-url: 'https://registry.npmjs.org'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      # Same pack the release CI audits; publish from source keeps the
+      # published artifact reproducible with the repo state.
+      - name: Publish
+        run: pnpm publish --no-git-checks --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
