@@ -1,7 +1,7 @@
 # DSH 输入助手
 
 [![CI](https://github.com/Somnus678/dsh-input-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/Somnus678/dsh-input-assistant/actions/workflows/ci.yml)
-[![release](https://img.shields.io/badge/release-v0.1.2-blue)](https://github.com/Somnus678/dsh-input-assistant/releases/tag/v0.1.2)
+[![release](https://img.shields.io/badge/release-v0.1.3-blue)](https://github.com/Somnus678/dsh-input-assistant/releases/tag/v0.1.3)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![dsh](https://img.shields.io/badge/DSH-0.2.1--rc.2-purple)](https://github.com/deepseek-ai/deepseek-harness)
 [![tests](https://img.shields.io/badge/tests-121%20passed-brightgreen)](docs/validation.md)
@@ -42,21 +42,21 @@
 
 ## 安装
 
-需要 **Node.js >= 22.19** 和 **DSH `0.2.1-rc.2`**。安装预构建 `.tgz` 不需要在本地编译 TypeScript。
+需要 **Node.js >= 22.19** 和 **DSH `0.2.1-rc.2` 或 `0.2.1-rc.3`**。安装预构建 `.tgz` 不需要在本地编译 TypeScript。
 
 一行命令直接从 GitHub Release 安装：
 
 ```powershell
-dsh --version                                  # 确认 0.2.1-rc.2
-dsh plugin --profile web add https://github.com/Somnus678/dsh-input-assistant/releases/download/v0.1.2/dsh-input-assistant-0.1.2.tgz
+dsh --version                                  # 确认 0.2.1-rc.2 或 rc.3
+dsh plugin --profile web add https://github.com/Somnus678/dsh-input-assistant/releases/download/v0.1.3/dsh-input-assistant-0.1.3.tgz
 dsh --profile web --dump-config                # 应看到 dsh-input-assistant 层
 dsh --profile web
 ```
 
-也可以先从 [Releases](https://github.com/Somnus678/dsh-input-assistant/releases) 手动下载 `dsh-input-assistant-0.1.2.tgz` 再本地安装：
+也可以先从 [Releases](https://github.com/Somnus678/dsh-input-assistant/releases) 手动下载 `dsh-input-assistant-0.1.3.tgz` 再本地安装：
 
 ```powershell
-dsh plugin --profile web add ./dsh-input-assistant-0.1.2.tgz
+dsh plugin --profile web add ./dsh-input-assistant-0.1.3.tgz
 ```
 
 官方桌面端使用自己的 `desktop` profile（默认 Windows 安装位置）：
@@ -64,7 +64,7 @@ dsh plugin --profile web add ./dsh-input-assistant-0.1.2.tgz
 ```powershell
 $dsh = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
 & $dsh --version
-& $dsh plugin --profile desktop add (Resolve-Path './dsh-input-assistant-0.1.2.tgz').Path
+& $dsh plugin --profile desktop add (Resolve-Path './dsh-input-assistant-0.1.3.tgz').Path
 ```
 
 安装或升级后**完全退出并重新打开 DSH**，插件才会加载。
@@ -121,7 +121,7 @@ pnpm pack --pack-destination dist
 
 | 项目 | 支持范围 |
 |---|---|
-| DSH | `0.2.1-rc.2`（锁定） |
+| DSH | `0.2.1-rc.2` ~ `0.2.1-rc.3`（声明范围 `>=0.2.1-rc.2 <0.3.0-0`，两端均经全量测试验证） |
 | Node.js | `>= 22.19` |
 | 操作系统 | Windows x64（已验证）；macOS/Linux 未验证 |
 | 浏览器测试 | Microsoft Edge |
@@ -133,7 +133,7 @@ pnpm pack --pack-destination dist
 - 60 条固定合成质量集尚未跑完真实模型评测，也没有独立人工语义标注，状态为 `not_evaluated`。
 - 6 次真实模型小样本对照只能说明链路可用（2,807 tokens），**不能证明效果优于同类工具**。
 - 中文 IME 候选组合、附件/引用组合、完整官方 Web 组合、其他插件组合、非 Windows x64 平台均未验证。
-- 目标 DSH 版本锁定 `0.2.1-rc.2`；其他版本可能不兼容。
+- 兼容声明范围 `0.2.1-rc.2` ~ `0.2.1-rc.3`；此范围外的版本未经测试，可能不兼容。
 
 详见 [验收记录](docs/validation.md) 与 [低用量真实模型试验](docs/smoke-comparison.md)。
 

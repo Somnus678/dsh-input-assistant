@@ -78,7 +78,7 @@ describe.skipIf(!existsSync(archive))('published .tgz through the official Loade
   it('loads actual packed entry, configures, disables, reenables and unloads with drafts preserved', async () => {
     const packedRoot = await extractPublishedPackage()
     const pkg = JSON.parse(await readFile(resolve(packedRoot, 'package.json'), 'utf8'))
-    expect(pkg.engines.dsh).toBe('0.2.1-rc.2')
+    expect(pkg.engines.dsh).toBe('>=0.2.1-rc.2 <0.3.0-0')
     const patch = await readFile(resolve(packedRoot, 'cordis.patch.yml'), 'utf8')
     expect(patch).toContain('name: dsh-input-assistant')
     ctx = new Context()

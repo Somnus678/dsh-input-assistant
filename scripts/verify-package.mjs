@@ -20,7 +20,7 @@ for (let offset = 0; offset + 512 <= tar.length;) {
 for (const path of ['package/package.json', 'package/cordis.patch.yml', 'package/lib/index.js', 'package/lib/index.d.ts', 'package/lib/client.js', 'package/lib/core.js', 'package/README.md', 'package/LICENSE']) assert.ok(entries.has(path), `Missing ${path}`)
 assert.ok(![...entries.keys()].some(path => /node_modules|\.research|evaluation\/cases/.test(path)), 'Research/runtime/evaluation fixtures must not ship')
 const pkg = JSON.parse(entries.get('package/package.json'))
-assert.equal(pkg.engines.dsh, '0.2.1-rc.2')
+assert.equal(pkg.engines.dsh, '>=0.2.1-rc.2 <0.3.0-0')
 assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml')
 let module
 vm.runInNewContext(entries.get('package/lib/client.js'), { window: { __ModuleLoader__: { load: value => { module = value } } } })

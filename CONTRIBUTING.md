@@ -4,7 +4,7 @@
 
 ## 开始之前
 
-本项目是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的插件，锁定 DSH `0.2.1-rc.2`。开始前请确认：
+本项目是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的插件，兼容声明范围为 `>=0.2.1-rc.2 <0.3.0-0`（当前以 `0.2.1-rc.3` 为测试基准）。开始前请确认：
 
 - Node.js `>= 22.19`（开发验证使用 24.x）
 - pnpm 11
