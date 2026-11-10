@@ -1,10 +1,11 @@
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { defineDomain, domainTable, type Domain } from '@deepseek-ai/dsh-storage-domain'
-import { AssistantError, type AssistantConfig, type StoredDraft } from '../core/types'
-import { resolveConfig, resolveStoredConfig } from '../core/config'
+import { AssistantError, type AssistantConfig, type DraftMutationResult, type StoredDraft } from '../core/types.js'
+import { resolveConfig, resolveStoredConfig } from '../core/config.js'
+import { charCount } from '../core/context.js'
 
-const draftSchema = z.object({ id: z.string().min(1), text: z.string().min(1).max(32_000), createdAt: z.number().int().nonnegative() })
+export const draftSchema = z.object({ id: z.string().min(1).max(300), text: z.string().min(1).max(64_000).refine(text => charCount(text) <= 32_000), createdAt: z.number().int().nonnegative() })
 const sessionDraftsSchema = z.object({ version: z.literal(1), drafts: z.array(draftSchema).max(3) })
 
 export function createDomainSpec(initial: AssistantConfig) {
@@ -51,7 +52,7 @@ export class AssistantStorage {
   }
 
   save(sessionId: string, text: string, replaceId?: string): Promise<StoredDraft[]> {
-    if (text.trim().length === 0 || text.length > 32_000) throw new AssistantError('DRAFT', '暂存内容为空或超过 32,000 字符')
+    if (text.trim().length === 0 || text.length > 64_000 || charCount(text) > 32_000) throw new AssistantError('DRAFT', '暂存内容为空或超过 32,000 字符')
     return this.transaction(async domain => {
       const drafts = [...(domain.table('drafts').get(sessionId)?.drafts ?? [])]
       const index = replaceId === undefined ? -1 : drafts.findIndex(draft => draft.id === replaceId)
@@ -65,12 +66,28 @@ export class AssistantStorage {
     })
   }
 
-  delete(sessionId: string, id?: string): Promise<StoredDraft[]> {
+  delete(sessionId: string, id?: string): Promise<DraftMutationResult> {
     return this.transaction(async domain => {
       const current = domain.table('drafts').get(sessionId)?.drafts ?? []
       const drafts = id === undefined ? [] : current.filter(draft => draft.id !== id)
+      const removed = id === undefined ? current : current.filter(draft => draft.id === id)
       if (drafts.length === 0) await domain.table('drafts').delete(sessionId)
       else await domain.table('drafts').put(sessionId, { version: 1, drafts })
+      return { drafts: drafts.map(draft => ({ ...draft })), removed: removed.map(draft => ({ ...draft })) }
+    })
+  }
+
+  /** Undo deletion without overwriting drafts created or changed elsewhere. */
+  restore(sessionId: string, deleted: readonly StoredDraft[]): Promise<StoredDraft[]> {
+    const snapshots = z.array(draftSchema).max(3).parse(deleted)
+    return this.transaction(async domain => {
+      const drafts = [...(domain.table('drafts').get(sessionId)?.drafts ?? [])]
+      const ids = new Set(drafts.map(draft => draft.id))
+      for (const snapshot of snapshots) {
+        if (!ids.has(snapshot.id)) { drafts.push(snapshot); ids.add(snapshot.id) }
+      }
+      if (drafts.length > 3) throw new AssistantError('DRAFT_LIMIT', '当前会话暂存空间不足，请删除一条后再撤销')
+      if (drafts.length) await domain.table('drafts').put(sessionId, { version: 1, drafts })
       return drafts.map(draft => ({ ...draft }))
     })
   }

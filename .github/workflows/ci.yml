@@ -3,10 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
   workflow_dispatch:
+  workflow_call:
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
@@ -65,20 +65,28 @@ jobs:
       - name: Real-browser smoke test (Microsoft Edge)
         run: pnpm test:web
 
+      - name: Packaged browser regression test (Microsoft Edge)
+        run: pnpm test:package:web
+
       - name: Validate evaluation fixtures
         run: pnpm eval:validate
 
       - name: Confirm build is reproducible
         shell: pwsh
         run: |
-          $before = (Get-FileHash lib/index.js -Algorithm SHA256).Hash
+          $before = @(Get-ChildItem -LiteralPath lib -File -Recurse | Sort-Object FullName | ForEach-Object {
+            "$($_.FullName) $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
+          })
           pnpm build
-          $after = (Get-FileHash lib/index.js -Algorithm SHA256).Hash
-          if ($before -ne $after) {
-            Write-Error "Build is not reproducible: lib/index.js changed between two builds"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $after = @(Get-ChildItem -LiteralPath lib -File -Recurse | Sort-Object FullName | ForEach-Object {
+            "$($_.FullName) $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
+          })
+          if (Compare-Object $before $after -CaseSensitive) {
+            Write-Error "Build is not reproducible: lib/ artifacts changed between two builds"
             exit 1
           }
-          Write-Output "Reproducible build confirmed: $before"
+          Write-Output "Reproducible build confirmed for $($before.Count) artifacts"
 
       - name: Upload packaged plugin
         uses: actions/upload-artifact@v4
@@ -97,9 +105,13 @@ jobs:
   # (no Edge), and the coverage of that exclusion is provided by test-windows.
   # ---------------------------------------------------------------------------
   test-linux:
-    name: Test (Linux, excluding Edge-only tests)
+    name: Test (Linux, Node ${{ matrix.node }}, excluding Edge-only tests)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.19.0', '24.19.0']
     steps:
       - uses: actions/checkout@v4
 
@@ -109,7 +121,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24.19.0'
+          node-version: ${{ matrix.node }}
           cache: pnpm
 
       - name: Install dependencies
@@ -184,7 +196,7 @@ jobs:
             fail=1
           fi
           # Required entries.
-          for required in package/package.json package/cordis.patch.yml package/lib/index.js package/lib/client.js package/lib/core.js package/README.md package/LICENSE; do
+          for required in package/package.json package/cordis.patch.yml package/lib/index.js package/lib/client.js package/lib/core.js package/README.md package/README.en.md package/CHANGELOG.md package/LICENSE; do
             if ! echo "$listing" | grep -qx "$required"; then
               echo "::error::Missing required file: $required"
               fail=1
@@ -226,7 +238,7 @@ jobs:
           for required in \
             package.json pnpm-lock.yaml pnpm-workspace.yaml \
             tsconfig.json tsconfig.build.json vitest.config.ts \
-            cordis.patch.yml README.md LICENSE .gitignore \
+            cordis.patch.yml README.md README.en.md LICENSE .gitignore \
             .github/workflows/ci.yml; do
             if ! echo "$tracked" | grep -qx "$required"; then
               echo "::error::Required file is not tracked by git: $required"

@@ -3,12 +3,14 @@ export type Operation = 'optimize' | 'next' | 'complete'
 export interface TokenSpan { start: number; end: number; draftRev: number }
 export interface ModelRoute { provider: string; model: string }
 export type OptimizationStrength = 'light' | 'standard' | 'deep'
+export type PredictionDetail = 'concise' | 'standard' | 'detailed'
 export interface AssistantConfig {
   optimizeEnabled: boolean
   stashEnabled: boolean
   optimizationStrength: OptimizationStrength
   nextEnabled: boolean
   completionEnabled: boolean
+  predictionDetail: PredictionDetail
   displayMode: 'ghost' | 'panel'
   debounceMs: number
   minIntervalMs: number
@@ -23,7 +25,7 @@ export interface AssistantConfig {
 }
 export const DEFAULT_CONFIG: Readonly<AssistantConfig> = Object.freeze({
   optimizeEnabled: true, stashEnabled: true, optimizationStrength: 'standard',
-  nextEnabled: true, completionEnabled: true, displayMode: 'ghost',
+  nextEnabled: true, completionEnabled: true, predictionDetail: 'standard', displayMode: 'ghost',
   debounceMs: 600, minIntervalMs: 2000, maxHistoryChars: 16000,
   maxDraftChars: 8000, maxNextChars: 120, maxCompletionChars: 80,
   optimizeTimeoutMs: 60000, suggestionTimeoutMs: 15000, provider: '', model: '',
@@ -40,6 +42,8 @@ export interface InputSnapshot {
 }
 export interface GenerationRequest extends InputSnapshot {
   operation: Operation
+  /** Explicit user action; automatic feature toggles do not block a single manual suggestion. */
+  manual?: boolean
   targetText?: string
   lockedFragments?: readonly string[]
   provider?: string
@@ -47,6 +51,9 @@ export interface GenerationRequest extends InputSnapshot {
 }
 export interface GenerationResult {
   text: string | null
+  /** Temporary throttling is not a model abstention and must never be cached as one. */
+  outcome?: 'suggestion' | 'abstained' | 'throttled'
+  retryAfterMs?: number
   requestId: string
   sessionId: string
   sourceTurnId: string | null
@@ -64,6 +71,7 @@ export interface AssistantStatus {
   route?: ModelRoute
 }
 export interface StoredDraft { id: string; text: string; createdAt: number }
+export interface DraftMutationResult { drafts: StoredDraft[]; removed: StoredDraft[] }
 export const RPC_CHANNEL = '/api'
 export const RPC_PREFIX = 'input-assistant/'
 export class AssistantError extends Error {

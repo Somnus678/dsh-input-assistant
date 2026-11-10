@@ -1,8 +1,8 @@
 import { z } from 'zod'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { HistoryMessage } from '../core/types'
-import { buildContext } from '../core/context'
+import type { HistoryMessage } from '../core/types.js'
+import { buildContext } from '../core/context.js'
 
 /** Host-only projection: never adds records or messages to the user's session. */
 export interface TranscriptState {

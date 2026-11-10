@@ -27,19 +27,19 @@ pnpm build
 
 ```powershell
 pnpm typecheck      # 必须无输出
-pnpm test           # 121 条测试全部通过
+pnpm test           # 全量工程测试全部通过
 pnpm build          # 构建成功
 pnpm test:package   # 需要先 pnpm pack
 ```
 
-改动涉及界面或样式时，还应运行 `pnpm test:web`（需要 Edge）。
+改动涉及界面或样式时，还应运行 `pnpm test:web` 和 `pnpm test:package:web`（需要 Edge，后者需先构建并打包当前版本）。安装包浏览器夹具直接加载归档的 client/core，RPC 使用本地替身；实际宿主加载与路由另由 Loader/Gateway 测试验证。
 
 ## 持续集成
 
 PR 会自动触发 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。三个 job 都要绿：
 
-- `test-windows`：全量 121 条测试 + Edge 冒烟 + 构建可复现性。**这是权威结果。**
-- `test-linux`：排除 Edge 专属测试（116 条），检查跨平台假设。
+- `test-windows`：全量工程测试 + Edge 冒烟 + 构建可复现性。**这是权威结果。**
+- `test-linux`：Node 22.19／24.19 矩阵，排除 Edge 专属测试，检查跨平台假设与最低支持版本。
 - `package`：审计打包内容，确保不泄漏研究资料与测试夹具。
 
 只在 Linux 上绿的 PR 不算通过 —— 涉及浏览器渲染、样式或主题的改动必须在

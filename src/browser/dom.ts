@@ -1,4 +1,4 @@
-import type { TokenSpan } from '../core/types'
+import type { TokenSpan } from '../core/types.js'
 
 export interface ReferenceOccurrence { offset: number; length: number }
 export const CHIP_SELECTOR = '[data-composer-chip],[data-composer-text-ref],[data-composer-command]'

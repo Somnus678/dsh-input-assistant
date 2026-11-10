@@ -41,7 +41,10 @@ beforeAll(async () => {
   await mkdir('.test-runtime/web-theme', { recursive: true })
   browser = await chromium.launch({ channel: 'msedge', headless: true })
 }, 30000)
-afterAll(async () => { await browser?.close(); await new Promise<void>(resolve => server ? server.close(() => resolve()) : resolve()) })
+afterAll(async () => {
+  try { await browser?.close() }
+  finally { await new Promise<void>(resolve => server ? server.close(() => resolve()) : resolve()) }
+}, 30000)
 
 async function surfaceContrast(page: Page, selector: string): Promise<number> {
   return page.locator(selector).evaluate(element => {
@@ -74,9 +77,8 @@ describe('published DSH theme and clipped-composer regression', () => {
       expect(box.y).toBeGreaterThanOrEqual(11)
       expect(box.y + box.height).toBeLessThanOrEqual(709)
       await browserExpect(menu.getByText('输入助手', { exact: true })).toBeInViewport()
-      await page.getByLabel('输入续写', { exact: true }).check()
+      await page.evaluate(async () => { await (window as any).fixture.runtime.saveSettings({ completionEnabled: true, displayMode: 'panel' }) })
       await browserExpect(menu).toBeVisible()
-      await page.getByLabel('显示方式', { exact: true }).selectOption('panel')
       await page.getByRole('button', { name: '输入助手菜单', exact: true }).click()
       await page.evaluate(() => { (window as any).fixture.setDraft('请解释这段代码的时间'); (window as any).fixture.focus() })
       await browserExpect(page.locator('.dsh-ia-candidate')).toBeVisible()
@@ -85,6 +87,9 @@ describe('published DSH theme and clipped-composer regression', () => {
       await page.getByRole('textbox', { name: '测试草稿' }).press('Tab')
       await browserExpect(page.getByRole('textbox', { name: '测试草稿' })).toHaveText('请解释这段代码的时间复杂度。')
       await page.getByRole('button', { name: '优化', exact: true }).click()
+      await browserExpect(page.getByRole('dialog', { name: '优化预览' })).toBeVisible()
+      expect(await surfaceContrast(page, '.dsh-ia-preview')).toBeGreaterThanOrEqual(4.5)
+      await page.getByRole('button', { name: '采纳优化', exact: true }).click()
       await browserExpect(page.locator('body > .dsh-ia-notice')).toBeVisible()
       expect(await surfaceContrast(page, 'body > .dsh-ia-notice')).toBeGreaterThanOrEqual(4.5)
       await page.getByRole('button', { name: '输入助手菜单', exact: true }).click()
@@ -104,9 +109,10 @@ describe('published DSH theme and clipped-composer regression', () => {
       expect(box.y).toBeGreaterThanOrEqual(11)
       expect(box.y + box.height).toBeLessThanOrEqual(329)
       expect(await menu.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true)
-      await menu.getByText('辅助模型设置', { exact: true }).click()
-      await menu.getByRole('button', { name: '保存模型设置', exact: true }).scrollIntoViewIfNeeded()
-      await browserExpect(menu.getByRole('button', { name: '保存模型设置', exact: true })).toBeInViewport()
+      await menu.getByRole('button', { name: '暂停至下次编辑', exact: true }).scrollIntoViewIfNeeded()
+      await browserExpect(menu.getByRole('button', { name: '暂停至下次编辑', exact: true })).toBeInViewport()
+      await menu.getByText('本次使用统计', { exact: true }).click()
+      await menu.getByText('功能开关、显示方式与辅助模型：DSH 设置 → 输入助手（全局设置）', { exact: true }).scrollIntoViewIfNeeded()
       await page.screenshot({ path: '.test-runtime/web-theme/small-dark.png' })
     } finally { await page.close() }
   }, 20000)
@@ -116,7 +122,7 @@ describe('published DSH theme and clipped-composer regression', () => {
     try {
       await page.goto(url)
       await page.getByRole('button', { name: '输入助手菜单', exact: true }).click()
-      await page.getByLabel('输入续写', { exact: true }).check()
+      await page.evaluate(async () => { await (window as any).fixture.runtime.saveSettings({ completionEnabled: true }) })
       await page.getByRole('button', { name: '输入助手菜单', exact: true }).click()
       await page.evaluate(() => { (window as any).fixture.setDraft('请解释这段代码的时间'); (window as any).fixture.focus() })
       const ghost = page.locator('.dsh-ia-ghost')

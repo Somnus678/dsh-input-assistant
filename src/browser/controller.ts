@@ -1,10 +1,10 @@
 import {
   DEFAULT_CONFIG, type AssistantConfig, type AssistantStatus, type GenerationRequest,
-  type GenerationResult, type InputSnapshot, type ModelRoute, type StoredDraft, type TokenSpan,
-} from '../core/types'
-import { focusedIn, nativeMenuOpen, selectedPlainText, type ReferenceOccurrence } from './dom'
-import { snapshotMatches } from '../core/snapshot'
-import { charCount } from '../core/context'
+  type DraftMutationResult, type GenerationResult, type InputSnapshot, type ModelRoute, type StoredDraft, type TokenSpan,
+} from '../core/types.js'
+import { focusedIn, nativeMenuOpen, selectedPlainText, type ReferenceOccurrence } from './dom.js'
+import { snapshotMatches } from '../core/snapshot.js'
+import { charCount } from '../core/context.js'
 
 export interface BrowserInput {
   draft: string; draftRev: number; phase: string
@@ -23,7 +23,15 @@ export interface BrowserTransport {
   call<T>(method: string, data: unknown, signal?: AbortSignal): Promise<T>
   generation(): string | null
 }
-export interface Suggestion { text: string; snapshot: InputSnapshot; kind: 'next' | 'complete' }
+export interface Suggestion { text: string; snapshot: GenerationRequest; kind: 'next' | 'complete' }
+export interface OptimizationPreview {
+  request: GenerationRequest; text: string; beforeTarget: string
+  clipboardStart: number; clipboardEnd: number; clientGeneration: string | null
+}
+export interface UndoSnapshot {
+  recent: readonly StoredDraft[]; expiresAt: number; pending: readonly StoredDraft[]; generation: string | null
+}
+export type SuggestionStatus = 'idle' | 'waiting' | 'generating' | 'ready' | 'throttled' | 'abstained' | 'failed' | 'paused'
 export interface ChangeRecord {
   before: string; after: string; beforeTarget: string; afterTarget: string
   span: TokenSpan; sourceTurnId: string | null; connectionGeneration: string; routeKey: string
@@ -33,10 +41,17 @@ export interface BrowserState {
   status: AssistantStatus | null
   settings: AssistantConfig
   busy: 'optimize' | 'stash' | null
+  stashClearCancelled: boolean
+  stashClearPending: boolean
   notice: string
   suggestion: Suggestion | null
+  suggestionStatus: SuggestionStatus
+  suggestionMessage: string
+  preview: OptimizationPreview | null
   change: ChangeRecord | null
   drafts: readonly StoredDraft[]
+  deletedDrafts: readonly StoredDraft[]
+  pendingUndoDrafts: readonly StoredDraft[]
   locked: readonly string[]
   connected: boolean
   settingsSaving: boolean
@@ -50,8 +65,8 @@ interface ActiveRequest {
   startedAt: number
   latencyRecorded: boolean
 }
-const initial = (): BrowserState => ({ status: null, settings: { ...DEFAULT_CONFIG }, busy: null,
-  notice: '', suggestion: null, change: null, drafts: [], locked: [], connected: false, settingsSaving: false, metrics: emptyMetrics() })
+const initial = (): BrowserState => ({ status: null, settings: { ...DEFAULT_CONFIG }, busy: null, stashClearCancelled: false, stashClearPending: false,
+  notice: '', suggestion: null, suggestionStatus: 'idle', suggestionMessage: '', preview: null, change: null, drafts: [], deletedDrafts: [], pendingUndoDrafts: [], locked: [], connected: false, settingsSaving: false, metrics: emptyMetrics() })
 
 /** One controller per mounted composer. Right/overlay surfaces consume this same store. */
 export class InputAssistantController {
@@ -62,14 +77,22 @@ export class InputAssistantController {
   private timer: ReturnType<typeof setTimeout> | undefined
   /** Cache key the armed completion timer was scheduled for; null when no timer is armed. */
   private timerKey: string | null = null
+  private manualTimerKey: string | null = null
   private poll: ReturnType<typeof setInterval> | undefined
+  private undoTimer: ReturnType<typeof setTimeout> | undefined
+  private undoExpiresAt = 0
+  private readonly requestPrefix = Array.from(crypto.getRandomValues(new Uint32Array(4)), word => word.toString(36)).join('-')
+  private completionRetryAt = 0
   private polling = false
   private lifecycle = new AbortController()
   private disposed = false
   private composing = false
   private settingsPending = false
   private settingsEpoch = 0
+  private draftsEpoch = 0
+  private stashEpoch = 0
   private nextTurns = new Set<string>()
+  private failedNextKey: string | null = null
   private nextCache: { text: string; turn: string; route: string; generation: string } | null = null
   private completionCache = new Map<string, string | null>()
   private failedCompletionKey: string | null = null
@@ -82,8 +105,28 @@ export class InputAssistantController {
   private acceptance: { expected: string; edits: number; counted: boolean } | null = null
 
   constructor(readonly sessionId: string, private readonly transport: BrowserTransport, metrics?: UsageMetrics,
-    private readonly saveSettings?: (update: Partial<AssistantConfig>) => Promise<AssistantConfig>) {
+    private readonly saveSettings?: (update: Partial<AssistantConfig>) => Promise<AssistantConfig>, undo?: UndoSnapshot) {
     if (metrics) this.state.metrics = { ...metrics }
+    if (undo && undo.generation === transport.generation()) {
+      this.clientGeneration = undo.generation
+      this.state.pendingUndoDrafts = undo.pending.map(draft => ({ ...draft }))
+      if (undo.expiresAt > Date.now()) {
+        this.state.deletedDrafts = undo.recent.map(draft => ({ ...draft }))
+        this.undoExpiresAt = undo.expiresAt; this.armUndoExpiry()
+      }
+    }
+  }
+  getUndoSnapshot(): UndoSnapshot {
+    return { recent: this.undoExpiresAt > Date.now() ? this.state.deletedDrafts.map(draft => ({ ...draft })) : [],
+      expiresAt: this.undoExpiresAt, pending: this.state.pendingUndoDrafts.map(draft => ({ ...draft })), generation: this.clientGeneration }
+  }
+  private armUndoExpiry(): void {
+    clearTimeout(this.undoTimer)
+    if (!Number.isFinite(this.undoExpiresAt)) return
+    this.undoTimer = setTimeout(() => {
+      this.undoExpiresAt = 0
+      this.patch({ deletedDrafts: [], notice: this.state.notice === '已删除暂存，10 秒内可撤销' ? '' : this.state.notice })
+    }, Math.max(0, this.undoExpiresAt - Date.now()))
   }
   getSnapshot = (): BrowserState => this.state
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
@@ -97,13 +140,28 @@ export class InputAssistantController {
     if (this.poll || this.disposed) return
     void this.refresh()
     void this.refreshDrafts()
-    this.poll = setInterval(() => { void this.refresh() }, 900)
+    this.schedulePoll()
+    document.addEventListener('visibilitychange', this.visibilityChanged)
+  }
+  private visibilityChanged = (): void => {
+    clearTimeout(this.poll)
+    if (document.visibilityState === 'hidden') {
+      if (this.active?.snapshot.operation !== 'optimize' && !this.active?.snapshot.manual) this.cancelActive()
+      this.clearTimer(); this.patch({ suggestion: null, suggestionStatus: 'paused', suggestionMessage: '页面已隐藏，自动建议已暂停' })
+    } else { void this.refresh(); this.driveSuggestions() }
+    this.schedulePoll()
+  }
+  private schedulePoll(): void {
+    const delay = document.visibilityState === 'hidden' ? 10000 : this.binding?.running || this.state.busy ? 900 : 3000
+    this.poll = setTimeout(() => { void this.refresh(); this.schedulePoll() }, delay)
   }
   dispose(): void {
     if (this.disposed) return
     this.cancelActive()
     this.clearTimer()
-    clearInterval(this.poll)
+    clearTimeout(this.poll)
+    clearTimeout(this.undoTimer)
+    document.removeEventListener('visibilitychange', this.visibilityChanged)
     this.lifecycle.abort()
     this.disposed = true
     this.listeners.clear()
@@ -117,7 +175,9 @@ export class InputAssistantController {
     if (generation !== this.clientGeneration) {
       this.clientGeneration = generation
       this.invalidate(true)
-      this.patch({ connected: false, status: null, drafts: [] })
+      clearTimeout(this.undoTimer)
+      this.undoExpiresAt = 0
+      this.patch({ connected: false, status: null, drafts: [], deletedDrafts: [], pendingUndoDrafts: [] })
       if (generation !== null && this.poll) { void this.refresh(); void this.refreshDrafts() }
     }
     const changed = previous && (previous.input.draftRev !== binding.input.draftRev || previous.input.draft !== binding.input.draft
@@ -129,7 +189,7 @@ export class InputAssistantController {
       if (previous.input.draft !== binding.input.draft) this.observeAcceptedEdit(binding.input.draft)
       if (previous.input.draft !== binding.input.draft) this.lockedRanges = []
       if (previous.input.draft !== binding.input.draft) this.failedCompletionKey = null
-      this.patch({ suggestion: null, ...(previous.input.draft !== binding.input.draft ? { locked: [] } : {}) })
+      this.patch({ suggestion: null, suggestionStatus: 'idle', suggestionMessage: '', preview: null, ...(previous.input.draft !== binding.input.draft ? { locked: [] } : {}) })
       if (this.suppressUntilEdit !== null && binding.input.draft !== this.suppressUntilEdit) this.suppressUntilEdit = null
     }
     this.driveSuggestions()
@@ -148,7 +208,22 @@ export class InputAssistantController {
     if (value) { this.cancelActive(); this.clearTimer(); this.patch({ suggestion: null }) }
     else this.driveSuggestions()
   }
-  dismissSuggestion(): void { this.clearTimer(); this.cancelActive(); this.patch({ suggestion: null }); this.suppressUntilEdit = this.binding?.input.draft ?? '' }
+  dismissSuggestion(): void { this.clearTimer(); this.cancelActive(); this.patch({ suggestion: null, suggestionStatus: 'paused', suggestionMessage: '已暂停至下次编辑' }); this.suppressUntilEdit = this.binding?.input.draft ?? '' }
+  dismissOptimization(): void {
+    this.suppressUntilEdit = this.binding?.input.draft ?? ''
+    this.patch({ preview: null, notice: '已保留原文' })
+  }
+  cancelOperation(): void {
+    if (this.state.busy === 'stash' && this.state.stashClearPending) {
+      this.stashEpoch++
+      this.patch({ stashClearCancelled: true, notice: '已取消清空；保存完成后仍保留当前输入' })
+      return
+    }
+    if (this.state.busy === 'stash') { this.patch({ notice: '存储操作正在完成，请稍后再操作' }); return }
+    this.cancelActive(); this.clearTimer()
+    this.suppressUntilEdit = this.binding?.input.draft ?? ''
+    this.patch({ preview: null, suggestion: null, notice: '已取消，原稿已保留' })
+  }
   clearNotice(): void { this.patch({ notice: '' }) }
   notice(text: string): void { this.patch({ notice: text }) }
 
@@ -165,14 +240,16 @@ export class InputAssistantController {
         || this.routeKey(status.route) !== this.routeKey(previous.route) || status.running !== previous.running
         || JSON.stringify(status.settings) !== JSON.stringify(previous.settings))
       if (changed) this.invalidate(true)
-      this.patch({ status, settings: status.settings, connected: this.transport.generation() !== null })
+      if (!previous || changed || !this.state.connected) this.patch({ status, settings: status.settings, connected: true })
       this.driveSuggestions()
     } catch {
       // A failed status read is not evidence that the draft/model/turn changed.
       // Preserve completed/failed attempts across a transient transport error,
       // and keep a manual optimization in flight: aborting it here would drop
       // the user's request with no visible error.
-      if (!this.disposed) { this.invalidate(false, false); this.patch({ connected: false }) }
+      if (!this.disposed && this.transport.generation() === generation && settingsEpoch === this.settingsEpoch) {
+        this.invalidate(false, false); this.patch({ connected: false })
+      }
     } finally { this.polling = false }
   }
 
@@ -225,7 +302,7 @@ export class InputAssistantController {
     }
     this.clearTimer()
     this.cancelActive()
-    this.patch({ suggestion: null, busy: 'optimize', notice: '' })
+    this.patch({ suggestion: null, preview: null, busy: 'optimize', notice: '' })
     const snapshot = this.snapshot('optimize', target.span, target.text)
     if (!snapshot) { this.patch({ busy: null, notice: '连接或模型尚未就绪，请稍后重试' }); return }
     const active = this.begin(snapshot)
@@ -233,20 +310,37 @@ export class InputAssistantController {
       const result = await this.transport.call<GenerationResult>('generate', snapshot, active.controller.signal)
       if (this.active !== active || !this.isCurrent(snapshot, false) || !this.validResult(result, snapshot)) return
       if (result.text === null || !result.text.trim()) { this.patch({ notice: '没有可应用的优化结果，原文已保留' }); return }
-      const after = binding.input.draft.slice(0, target.clipboardStart) + result.text + binding.input.draft.slice(target.clipboardEnd)
-      if (!binding.actions.insertText(result.text, target.span)) { this.patch({ notice: '草稿已变化，已放弃本次结果' }); return }
-      binding.actions.persistDraft?.()
-      this.suppressUntilEdit = after
-      this.patch({ change: { before: binding.input.draft, after, beforeTarget: target.text, afterTarget: result.text,
-        span: { ...target.span, end: target.span.start + result.text.length }, sourceTurnId: snapshot.sourceTurnId,
-        connectionGeneration: snapshot.connectionGeneration, routeKey: snapshot.routeKey,
-        clientGeneration: active.clientGeneration }, notice: '已优化，可查看改动或撤销' })
+      this.patch({ preview: { request: snapshot, text: result.text, beforeTarget: target.text,
+        clipboardStart: target.clipboardStart, clipboardEnd: target.clipboardEnd,
+        clientGeneration: active.clientGeneration }, notice: '' })
     } catch (error) {
       if (!active.controller.signal.aborted) this.patch({ notice: this.errorMessage(error) })
     } finally {
       this.recordLatency(active)
       if (this.active === active) { this.active = null; this.patch({ busy: null }) }
     }
+  }
+
+  applyOptimization(): boolean {
+    const preview = this.state.preview, binding = this.binding
+    if (!preview || !binding || !this.state.connected || this.state.busy || this.settingsPending || this.composing
+      || !this.state.settings.optimizeEnabled || !this.isCurrent(preview.request, false)
+      || preview.clientGeneration !== this.transport.generation()) {
+      this.patch({ preview: null, notice: '草稿或会话已变化，原文已保留' }); return false
+    }
+    const { request, text, beforeTarget, clipboardStart, clipboardEnd, clientGeneration } = preview
+    const before = binding.input.draft
+    const after = before.slice(0, clipboardStart) + text + before.slice(clipboardEnd)
+    if (!binding.actions.insertText(text, request.span)) {
+      this.patch({ preview: null, notice: '草稿已变化，已放弃本次结果' }); return false
+    }
+    binding.actions.persistDraft?.()
+    this.suppressUntilEdit = after
+    this.patch({ preview: null, change: { before, after, beforeTarget, afterTarget: text,
+      span: { ...request.span, end: request.span.start + text.length }, sourceTurnId: request.sourceTurnId,
+      connectionGeneration: request.connectionGeneration, routeKey: request.routeKey, clientGeneration },
+      notice: '已采纳优化，可查看改动或还原' })
+    return true
   }
 
   canRestore(): boolean {
@@ -267,11 +361,11 @@ export class InputAssistantController {
   acceptSuggestion(): boolean {
     const suggestion = this.state.suggestion, binding = this.binding
     if (!suggestion || !binding || !this.isCurrent(suggestion.snapshot, true) || !this.eligible()
-      || (suggestion.kind === 'next' ? !this.state.settings.nextEnabled : !this.state.settings.completionEnabled)) {
+      || (!suggestion.snapshot.manual && (suggestion.kind === 'next' ? !this.state.settings.nextEnabled : !this.state.settings.completionEnabled))) {
       this.patch({ suggestion: null }); return false
     }
     const applied = binding.actions.insertText(suggestion.text, suggestion.snapshot.span)
-    this.patch({ suggestion: null })
+    this.patch({ suggestion: null, suggestionStatus: applied ? 'paused' : 'idle', suggestionMessage: applied ? '已采纳，继续编辑后恢复自动建议' : '' })
     if (applied) {
       binding.actions.persistDraft?.(); this.suppressUntilEdit = binding.input.draft + suggestion.text
       this.acceptance = { expected: this.suppressUntilEdit, edits: 0, counted: false }
@@ -293,11 +387,13 @@ export class InputAssistantController {
   }
 
   async refreshDrafts(): Promise<void> {
-    const generation = this.transport.generation()
+    const generation = this.transport.generation(), epoch = this.draftsEpoch
     if (generation === null) return
     try { const drafts = await this.transport.call<StoredDraft[]>('drafts/list', { sessionId: this.sessionId }, this.lifecycle.signal)
-      if (generation === this.transport.generation()) this.patch({ drafts }) }
-    catch (error) { if (!this.lifecycle.signal.aborted) this.patch({ notice: this.errorMessage(error) }) }
+      if (generation === this.transport.generation() && epoch === this.draftsEpoch) this.patch({ drafts }) }
+    catch (error) {
+      if (!this.lifecycle.signal.aborted && generation === this.transport.generation() && epoch === this.draftsEpoch) this.patch({ notice: this.errorMessage(error) })
+    }
   }
   async stash(replaceId?: string): Promise<void> {
     if (this.settingsPending) return
@@ -307,12 +403,19 @@ export class InputAssistantController {
     if (!this.pureText() || !binding.input.draft.trim()) { this.patch({ notice: '暂存仅支持无引用、无附件的非空纯文本草稿' }); return }
     if (this.state.drafts.length >= 3 && !replaceId) { this.patch({ notice: '已暂存三条，请删除一条或选择替换' }); return }
     const original = binding.input.draft, rev = binding.input.draftRev, clientGeneration = this.transport.generation()
-    this.cancelActive(); this.clearTimer(); this.patch({ busy: 'stash', suggestion: null, notice: '' })
+    const stashEpoch = ++this.stashEpoch
+    const settingsEpoch = this.settingsEpoch, routeKey = this.routeKey(binding.route ?? this.state.status?.route)
+    this.draftsEpoch++
+    this.cancelActive(); this.clearTimer(); this.patch({ busy: 'stash', stashClearPending: true, stashClearCancelled: false, suggestion: null, notice: '' })
     try {
       await this.transport.call('drafts/save', { sessionId: this.sessionId, text: original, ...(replaceId ? { replaceId } : {}) }, this.lifecycle.signal)
       await this.refreshDrafts()
       const live = this.binding
-      if (!this.settingsPending && this.state.settings.stashEnabled && live?.input.draftRev === rev && live.input.draft === original && live.input.phase === 'plain'
+      if (stashEpoch !== this.stashEpoch) {
+        this.patch({ notice: '草稿已保存；已按取消要求保留当前输入' }); return
+      }
+      if (!this.settingsPending && settingsEpoch === this.settingsEpoch && this.state.settings.stashEnabled
+        && this.routeKey(live?.route ?? this.state.status?.route) === routeKey && live?.input.draftRev === rev && live.input.draft === original && live.input.phase === 'plain'
         && clientGeneration === this.transport.generation() && this.pureText()) {
         if (live.actions.insertText('', { start: 0, end: original.length, draftRev: rev })) {
           live.actions.persistDraft?.(); this.suppressUntilEdit = ''; this.patch({ notice: '草稿已暂存并清空；可撤销清空' }); return
@@ -320,7 +423,7 @@ export class InputAssistantController {
       }
       this.patch({ notice: '已保存快照；当前状态已变化，保留当前输入' })
     } catch (error) { this.patch({ notice: this.errorMessage(error) }) }
-    finally { this.patch({ busy: null }) }
+    finally { this.patch({ busy: null, stashClearCancelled: false, stashClearPending: false }) }
   }
   restoreDraft(draft: StoredDraft, mode: 'append' | 'replace'): boolean {
     if (this.settingsPending) return false
@@ -338,8 +441,81 @@ export class InputAssistantController {
   async deleteDraft(id: string): Promise<void> { await this.mutateDraft('drafts/delete', { sessionId: this.sessionId, id }) }
   async clearDrafts(): Promise<void> { await this.mutateDraft('drafts/clear', { sessionId: this.sessionId }) }
   private async mutateDraft(method: string, data: unknown): Promise<void> {
-    try { await this.transport.call(method, data, this.lifecycle.signal); await this.refreshDrafts() }
+    if (this.state.busy || this.transport.generation() === null) return
+    if (this.undoExpiresAt === Infinity && this.state.deletedDrafts.length && this.state.pendingUndoDrafts.length) {
+      this.patch({ notice: '两批待恢复备份尚未处理，请先复制或放弃一批，再删除新的暂存' }); return
+    }
+    const generation = this.transport.generation()
+    this.draftsEpoch++
+    this.patch({ busy: 'stash' })
+    try {
+      const result = await this.transport.call<DraftMutationResult>(method, data, this.lifecycle.signal)
+      if (generation !== this.transport.generation()) return
+      if (result.removed.length) {
+        clearTimeout(this.undoTimer)
+        this.patch({ drafts: result.drafts, deletedDrafts: result.removed, notice: '已删除暂存，10 秒内可撤销' })
+        this.undoExpiresAt = Date.now() + 10000; this.armUndoExpiry()
+      } else this.patch({ drafts: result.drafts })
+    }
     catch (error) { this.patch({ notice: this.errorMessage(error) }) }
+    finally { this.patch({ busy: null }) }
+  }
+  async undoDeleteDrafts(target: 'recent' | 'pending' = 'recent'): Promise<void> {
+    const deleted = target === 'pending' ? this.state.pendingUndoDrafts : this.state.deletedDrafts
+    if (!deleted.length || this.state.busy || this.transport.generation() === null) return
+    const generation = this.transport.generation()
+    this.draftsEpoch++
+    if (target === 'recent') clearTimeout(this.undoTimer)
+    this.patch({ busy: 'stash' })
+    try {
+      const drafts = await this.transport.call<StoredDraft[]>('drafts/restore', { sessionId: this.sessionId, drafts: deleted }, this.lifecycle.signal)
+      if (generation === this.transport.generation()) {
+        if (target === 'recent') this.undoExpiresAt = 0
+        this.patch({ drafts, ...(target === 'recent' ? { deletedDrafts: [] } : { pendingUndoDrafts: [] }), notice: '已撤销删除' })
+      }
+    } catch (error) {
+      if (generation === this.transport.generation()) {
+        if (target === 'recent' && !this.state.pendingUndoDrafts.length) {
+          this.undoExpiresAt = 0
+          this.patch({ pendingUndoDrafts: deleted, deletedDrafts: [] })
+        } else if (target === 'recent') this.undoExpiresAt = Infinity
+        this.patch({ notice: `${this.errorMessage(error)}；待恢复文字已保留，可重试或复制` })
+      }
+    }
+    finally { this.patch({ busy: null }) }
+  }
+  discardPendingUndo(): void {
+    if (this.undoExpiresAt === Infinity) {
+      this.undoExpiresAt = 0
+      this.patch({ pendingUndoDrafts: this.state.deletedDrafts, deletedDrafts: [], notice: '已放弃选定恢复备份，其余备份仍保留' })
+    } else this.patch({ pendingUndoDrafts: [], notice: '已放弃选定恢复备份' })
+  }
+  retrySuggestion(): void {
+    if (!this.eligibleForManual()) {
+      this.patch({ notice: '请在可见、已连接且空闲的纯文本输入框中，将光标移到末尾后生成建议' }); return
+    }
+    const binding = this.binding!, span = binding.actions.captureInsertion()
+    if (span.start !== span.end || span.end !== binding.input.draft.length || !focusedIn(binding.editor)) {
+      this.patch({ notice: '请将光标移至草稿末尾后生成建议' }); return
+    }
+    const operation = binding.input.draft.length ? 'complete' : 'next'
+    if (operation === 'next' && !this.state.status?.sourceTurnId || operation === 'complete' && !binding.input.draft.trim()) {
+      this.patch({ notice: '请先输入草稿，或等待一轮回复完成后再预测下一句' }); return
+    }
+    this.clearTimer(); this.cancelActive(); this.suppressUntilEdit = null
+    this.failedCompletionKey = null; this.failedNextKey = null
+    this.completionCache.delete(this.completionKey()); this.nextTurns.delete(this.nextKey())
+    this.patch({ suggestion: null, notice: '' })
+    void this.requestSuggestion(operation, true)
+  }
+  private eligibleForManual(): boolean {
+    return this.pureText() && document.visibilityState !== 'hidden' && !this.composing && !this.settingsPending
+      && !this.binding?.running && !this.state.status?.running && !this.state.busy && !this.state.preview && this.state.connected
+      && charCount(this.binding?.input.draft ?? '') <= this.state.settings.maxDraftChars
+      && !nativeMenuOpen(this.binding?.editor ?? null)
+  }
+  private suggestionStatus(status: SuggestionStatus, message: string): void {
+    if (this.state.suggestionStatus !== status || this.state.suggestionMessage !== message) this.patch({ suggestionStatus: status, suggestionMessage: message })
   }
 
   private captureTarget(requireSelection: boolean): { text: string; span: TokenSpan; clipboardStart: number; clipboardEnd: number } | null {
@@ -360,8 +536,8 @@ export class InputAssistantController {
     return Boolean(input && input.phase === 'plain' && !input.occurrences.length && !input.attachmentIds.length)
   }
   private eligible(): boolean {
-    return this.pureText() && !this.composing && !this.settingsPending && !this.binding?.running && !this.state.status?.running
-      && !this.state.busy && this.state.connected && this.suppressUntilEdit === null
+    return this.pureText() && document.visibilityState !== 'hidden' && !this.composing && !this.settingsPending && !this.binding?.running && !this.state.status?.running
+      && !this.state.busy && !this.state.preview && this.state.connected && this.suppressUntilEdit === null
   }
   private driveSuggestions(): void {
     const binding = this.binding, status = this.state.status
@@ -369,24 +545,33 @@ export class InputAssistantController {
     if (nativeMenuOpen(binding.editor)) { this.clearTimer(); return }
     const span = binding.actions.captureInsertion()
     if (span.start !== span.end || span.end !== binding.input.draft.length || !focusedIn(binding.editor)) { this.clearTimer(); return }
+    if (this.manualTimerKey === this.completionKey() && this.timer !== undefined) return
+    if (this.state.suggestion?.snapshot.manual && this.isCurrent(this.state.suggestion.snapshot, true)) return
     const turn = status.sourceTurnId
     const route = this.routeKey(binding.route ?? status.route)
     if (binding.input.draft === '') {
       this.clearTimer()
       if (!turn) return
-      if (!this.state.settings.nextEnabled || this.nextTurns.has(`${status.generation}:${turn}:${route}`)) return
-      // Bounded like the other caches: one entry per completed turn is tiny, but a
-      // long-lived tab must not accumulate them forever.
-      if (this.nextTurns.size >= 512) this.nextTurns.clear()
-      this.nextTurns.add(`${status.generation}:${turn}:${route}`)
+      const key = this.nextKey()
+      if (!this.state.settings.nextEnabled) {
+        if (['idle', 'waiting', 'paused'].includes(this.state.suggestionStatus)) this.suggestionStatus('paused', '自动预测已关闭，可手动生成')
+        return
+      }
+      if (this.nextTurns.has(key) || key === this.failedNextKey) return
       void this.requestSuggestion('next')
       return
     }
-    if (!this.state.settings.completionEnabled || charCount(binding.input.draft) > this.state.settings.maxDraftChars) { this.clearTimer(); return }
+    if (!this.state.settings.completionEnabled || charCount(binding.input.draft) > this.state.settings.maxDraftChars) {
+      this.clearTimer()
+      if (!this.state.settings.completionEnabled && !this.state.suggestion && ['idle', 'waiting', 'paused'].includes(this.state.suggestionStatus)) this.suggestionStatus('paused', '自动续写已关闭，可手动生成')
+      return
+    }
     if (this.nextCache && this.nextCache.turn === turn && this.nextCache.route === route && this.nextCache.generation === status.generation
       && this.nextCache.text.startsWith(binding.input.draft)) {
       this.clearTimer()
       const suffix = this.nextCache.text.slice(binding.input.draft.length)
+      const existing = this.state.suggestion
+      if (existing && existing.text === suffix && existing.kind === 'complete' && this.isCurrent(existing.snapshot, true)) return
       const snapshot = this.snapshot('complete', span)
       if (suffix && charCount(suffix) <= this.state.settings.maxCompletionChars && snapshot) this.patch({ suggestion: { text: suffix, snapshot, kind: 'complete' } })
       return
@@ -395,7 +580,11 @@ export class InputAssistantController {
     if (cacheKey === this.failedCompletionKey) { this.clearTimer(); return }
     if (this.completionCache.has(cacheKey)) {
       this.clearTimer()
-      const text = this.completionCache.get(cacheKey), snapshot = this.snapshot('complete', span)
+      const text = this.completionCache.get(cacheKey)
+      if (!text) { this.suggestionStatus('abstained', '模型本次未给出建议，可手动重试'); return }
+      const existing = this.state.suggestion
+      if (existing && existing.text === text && existing.kind === 'complete' && this.isCurrent(existing.snapshot, true)) return
+      const snapshot = this.snapshot('complete', span)
       if (text && snapshot) this.patch({ suggestion: { text, snapshot, kind: 'complete' } })
       return
     }
@@ -406,44 +595,75 @@ export class InputAssistantController {
     // that feeds the cache key changed.
     if (this.timer !== undefined && this.timerKey === cacheKey) return
     this.clearTimer()
-    const delay = Math.max(this.state.settings.debounceMs, this.lastCompletionStart + this.state.settings.minIntervalMs - Date.now())
+    const delay = Math.max(this.state.settings.debounceMs, this.lastCompletionStart + this.state.settings.minIntervalMs - Date.now(), this.completionRetryAt - Date.now())
     this.timerKey = cacheKey
+    this.suggestionStatus(this.completionRetryAt > Date.now() ? 'throttled' : 'waiting', this.completionRetryAt > Date.now() ? '等待最小请求间隔结束' : '等待输入停顿')
     this.timer = setTimeout(() => { this.timer = undefined; this.timerKey = null; void this.requestSuggestion('complete') }, delay)
   }
-  private async requestSuggestion(operation: 'next' | 'complete'): Promise<void> {
+  private async requestSuggestion(operation: 'next' | 'complete', manual = false, deferOnce = true): Promise<void> {
     const binding = this.binding
     if (!binding || !this.eligible()) return
+    if (!manual && !(operation === 'next' ? this.state.settings.nextEnabled : this.state.settings.completionEnabled)) return
     const span = binding.actions.captureInsertion(), snapshot = this.snapshot(operation, span)
     if (!snapshot || span.start !== span.end || span.end !== binding.input.draft.length) return
+    if (manual) snapshot.manual = true
     if (operation === 'complete') this.lastCompletionStart = Date.now()
-    const active = this.begin(snapshot), cacheKey = this.completionKey()
+    const active = this.begin(snapshot), cacheKey = this.completionKey(), nextKey = this.nextKey()
+    this.suggestionStatus('generating', manual ? '正在生成本次建议' : '正在生成建议')
+    let retry = false
     try {
       const result = await this.transport.call<GenerationResult>('generate', snapshot, active.controller.signal)
       if (this.active !== active || !this.isCurrent(snapshot, true)) return
       if (!this.validResult(result, snapshot)) {
         if (operation === 'complete') this.failedCompletionKey = cacheKey
+        else this.failedNextKey = nextKey
+        this.suggestionStatus('failed', '建议返回格式无效，可手动重试')
+        return
+      }
+      if (result.outcome === 'throttled') {
+        if (operation === 'complete') {
+          this.completionRetryAt = Date.now() + result.retryAfterMs!
+          retry = !manual || deferOnce
+          this.suggestionStatus('throttled', '等待最小请求间隔结束，可稍后重试')
+        }
         return
       }
       if (operation === 'complete') {
         this.completionCache.set(cacheKey, result.text)
         if (this.completionCache.size > 64) this.completionCache.delete(this.completionCache.keys().next().value!)
+      } else {
+        if (this.nextTurns.size >= 512) this.nextTurns.clear()
+        this.nextTurns.add(nextKey)
       }
       if (operation === 'next' && result.text) this.nextCache = { text: result.text, turn: snapshot.sourceTurnId!, route: snapshot.routeKey, generation: snapshot.connectionGeneration }
-      if (result.text) this.patch({ suggestion: { text: result.text, snapshot, kind: operation } })
+      if (result.text) this.patch({ suggestion: { text: result.text, snapshot, kind: operation }, suggestionStatus: 'ready', suggestionMessage: 'Tab 采纳，Esc 忽略' })
+      else this.suggestionStatus('abstained', '模型本次未给出建议，可手动重试')
     } catch {
       // A provider error or host deadline must not turn the status poll into a retry loop.
       // Explicit cancellation belongs to an obsolete attempt and must not poison a newer draft.
       if (operation === 'complete' && !active.controller.signal.aborted && this.active === active && this.isCurrent(snapshot, false)) {
         this.failedCompletionKey = cacheKey
       }
+      if (operation === 'next' && !active.controller.signal.aborted && this.active === active && this.isCurrent(snapshot, false)) this.failedNextKey = nextKey
+      if (!active.controller.signal.aborted && this.active === active && this.isCurrent(snapshot, false)) this.suggestionStatus('failed', '建议请求未完成，可手动重试')
     }
-    finally { this.recordLatency(active); if (this.active === active) this.active = null }
+    finally {
+      this.recordLatency(active)
+      if (this.active === active) {
+        this.active = null
+        if (retry && manual) {
+          this.timerKey = cacheKey
+          this.manualTimerKey = cacheKey
+          this.timer = setTimeout(() => { this.timer = undefined; this.timerKey = null; this.manualTimerKey = null; void this.requestSuggestion(operation, true, false) }, Math.max(1, this.completionRetryAt - Date.now()))
+        } else if (retry) this.driveSuggestions()
+      }
+    }
   }
   private snapshot(operation: GenerationRequest['operation'], span: TokenSpan, targetText?: string): GenerationRequest | null {
     const binding = this.binding, status = this.state.status
     if (!binding || !status || !this.state.connected) return null
     const route = binding.route ?? status.route
-    return { operation, sessionId: this.sessionId, requestId: `${Date.now().toString(36)}-${++this.sequence}`,
+    return { operation, sessionId: this.sessionId, requestId: `${this.requestPrefix}-${++this.sequence}`,
       sourceTurnId: status.sourceTurnId, draft: binding.input.draft, draftRev: binding.input.draftRev,
       span: { ...span }, connectionGeneration: status.generation, routeKey: this.routeKey(route),
       ...(targetText === undefined ? {} : { targetText }),
@@ -490,12 +710,20 @@ export class InputAssistantController {
       && result.connectionGeneration === request.connectionGeneration && result.routeKey === request.routeKey
       && result.span.start === request.span.start && result.span.end === request.span.end
       && (result.text === null || typeof result.text === 'string')
+      && (result.outcome === undefined || result.outcome === 'suggestion' && typeof result.text === 'string'
+        || result.outcome === 'abstained' && result.text === null
+        || result.outcome === 'throttled' && result.text === null && Number.isFinite(result.retryAfterMs) && result.retryAfterMs! > 0 && result.retryAfterMs! <= 30000)
   }
   private sameCaret(span: TokenSpan): boolean {
     const current = this.binding?.actions.captureInsertion()
     return Boolean(current && current.start === span.start && current.end === span.end && current.draftRev === span.draftRev)
   }
   private routeKey(route?: ModelRoute): string { return route ? JSON.stringify([route.provider, route.model]) : '' }
+  private nextKey(): string {
+    const settings = this.state.settings
+    const route = settings.provider && settings.model ? { provider: settings.provider, model: settings.model } : this.binding?.route ?? this.state.status?.route
+    return JSON.stringify([this.state.status?.generation, this.state.status?.sourceTurnId, this.routeKey(route)])
+  }
   private completionKey(): string { return JSON.stringify([this.state.status?.generation, this.state.status?.sourceTurnId, this.routeKey(this.binding?.route ?? this.state.status?.route), this.binding?.input.draft]) }
   private invalidate(dropCache: boolean, cancelInFlight = true): void {
     // A transient status read failure is not evidence that the draft, turn or
@@ -505,10 +733,10 @@ export class InputAssistantController {
     if (cancelInFlight) this.cancelActive()
     else if (this.active?.snapshot.operation !== 'optimize') this.cancelActive()
     this.clearTimer()
-    if (dropCache) { this.nextCache = null; this.completionCache.clear(); this.failedCompletionKey = null }
-    this.patch({ suggestion: null })
+    if (dropCache) { this.nextCache = null; this.completionCache.clear(); this.failedCompletionKey = null; this.failedNextKey = null; this.completionRetryAt = 0 }
+    this.patch({ suggestion: null, ...(cancelInFlight ? { preview: null } : {}) })
   }
-  private clearTimer(): void { clearTimeout(this.timer); this.timer = undefined; this.timerKey = null }
+  private clearTimer(): void { clearTimeout(this.timer); this.timer = undefined; this.timerKey = null; this.manualTimerKey = null }
   private cancelActive(): void {
     const active = this.active
     if (!active) return
@@ -517,6 +745,7 @@ export class InputAssistantController {
     active.controller.abort()
     void this.transport.call('cancel', { sessionId: this.sessionId, requestId: active.snapshot.requestId }).catch(() => {})
     if (active.snapshot.operation === 'optimize') this.patch({ busy: null })
+    else this.suggestionStatus('idle', '')
   }
   private recordLatency(active: ActiveRequest): void {
     if (active.latencyRecorded) return

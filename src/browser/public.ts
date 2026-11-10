@@ -1,2 +1,2 @@
-export { BrowserRuntime } from './runtime'
-export { InputAssistantController } from './controller'
+export { BrowserRuntime } from './runtime.js'
+export { InputAssistantController } from './controller.js'

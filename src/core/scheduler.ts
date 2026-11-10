@@ -1,4 +1,4 @@
-import { AssistantError, type Operation } from './types'
+import { AssistantError, type Operation } from './types.js'
 interface Flight { requestId: string; operation: Operation; controller: AbortController }
 
 /** Cancellation settles callers even if a provider ignores AbortSignal. Late results cannot win. */

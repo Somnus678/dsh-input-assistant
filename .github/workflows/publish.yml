@@ -22,8 +22,13 @@ permissions:
   contents: read
 
 jobs:
+  validate:
+    name: Validate release artifact
+    uses: ./.github/workflows/ci.yml
+
   publish:
-    name: Build and publish
+    name: Publish validated artifact
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -39,18 +44,17 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Check release tag matches package version
+        run: |
+          node --input-type=module -e "import fs from 'node:fs'; const p=JSON.parse(fs.readFileSync('package.json','utf8')); if(process.env.GITHUB_REF_TYPE==='tag' && process.env.GITHUB_REF_NAME!=='v'+p.version) throw new Error('Release tag must match package.json version');"
 
-      - name: Typecheck
-        run: pnpm typecheck
+      - name: Download tested package
+        uses: actions/download-artifact@v4
+        with:
+          name: dsh-input-assistant-tgz
+          path: dist
 
-      - name: Build
-        run: pnpm build
-
-      # Same pack the release CI audits; publish from source keeps the
-      # published artifact reproducible with the repo state.
       - name: Publish
-        run: pnpm publish --no-git-checks --access public
+        run: pnpm publish dist/dsh-input-assistant-*.tgz --no-git-checks --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

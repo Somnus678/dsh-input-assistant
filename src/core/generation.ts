@@ -1,6 +1,6 @@
-import { AssistantError, type AssistantConfig, type GenerationRequest, type HistoryMessage, type Operation } from './types'
-import { buildContext, charCount } from './context'
-import { protectText, restoreProtected, type ProtectedText } from './protection'
+import { AssistantError, type AssistantConfig, type GenerationRequest, type HistoryMessage, type Operation } from './types.js'
+import { buildContext, charCount } from './context.js'
+import { protectText, restoreProtected, type ProtectedText } from './protection.js'
 
 export const NO_SUGGESTION = '[[NO_SUGGESTION]]'
 export interface PreparedGeneration {
@@ -29,6 +29,13 @@ export function prepareGeneration(request: GenerationRequest, history: readonly 
   if (charCount(target) > config.maxDraftChars) throw new AssistantError('TOO_LONG', `本次文本超过 ${config.maxDraftChars} 字符，请选中较短片段优化`)
   if (request.operation === 'optimize' && !target.trim()) throw new AssistantError('EMPTY', '请先输入或选中需要优化的文字')
   if (request.operation === 'complete' && !request.draft.trim()) throw new AssistantError('EMPTY', '没有可续写的草稿')
+  const detail = config.predictionDetail
+  const suggestionCap = request.operation === 'next' ? config.maxNextChars : config.maxCompletionChars
+  const detailGuidance = {
+    concise: 'Detail level: CONCISE. Prefer one brief sentence or phrase. Do not add scope merely to fill the character budget.',
+    standard: 'Detail level: STANDARD. Use a natural, complete expression with only the detail needed for the current intent.',
+    detailed: 'Detail level: DETAILED. Explain only already-supported intent more fully; short paragraphs or a structured list are allowed when useful. There is no minimum length. Never add tasks, constraints, permissions, deliverables, or commitments merely to make the message longer.',
+  }[detail]
   let system = common, protection: ProtectedText | null = null
   if (request.operation === 'optimize') {
     protection = protectText(target, request.lockedFragments)
@@ -53,18 +60,22 @@ export function prepareGeneration(request: GenerationRequest, history: readonly 
       'Consider answering the latest question, a natural follow-up question, correcting a misunderstanding, or proceeding with an explicitly requested unfinished step.',
       'A question or correction is allowed when supported. Do not automatically propose commits, pushing, testing, or new features just because code was produced.',
       `If no single continuation is well-supported, or the task is naturally finished, output ${NO_SUGGESTION}. Do not guess an unresolved choice.`,
-      `Return one short message of at most ${config.maxNextChars} characters.`,
+      `Return one message of at most ${suggestionCap} Unicode characters. This is a hard maximum, not a target or minimum.`,
+      detailGuidance,
+      detail === 'detailed' ? 'Internal line breaks are allowed for supported structure; do not add blank padding lines.' : 'Return a single line with no line breaks.',
       'Examples: user requested hit rate AND invalidation, only hit rate was explained -> 再解释一下缓存失效。',
       'User said explanation only, assistant proposes file edits -> 先不要改文件，请只解释原因。',
       `Assistant asks Redis or local cache, no preference in history -> ${NO_SUGGESTION}.`,
     ].join('\n')
   } else {
     system += '\n' + [
-      'Complete the user\'s current draft by returning ONLY a short suffix to append exactly at its end.',
+      'Complete the user\'s current draft by returning ONLY a suffix to append exactly at its end.',
       'The draft is the strongest constraint. Do not repeat its prefix, rewrite existing text, introduce a new topic, or answer the question.',
       'Preserve necessary leading whitespace in the suffix. A complete message does not need an arbitrary extra requirement.',
       `If the intended continuation is uncertain or the draft is already complete, output ${NO_SUGGESTION}.`,
-      `Return at most ${config.maxCompletionChars} characters, with no explanation.`,
+      `Return at most ${suggestionCap} Unicode characters, with no explanation. This is a hard maximum, not a target or minimum.`,
+      detailGuidance,
+      detail === 'detailed' ? 'Line breaks are allowed only when they naturally continue the existing draft structure. Preserve a necessary leading line break, but do not start an unrelated list or task.' : 'Return a single line with no line breaks.',
       'Examples: draft 请解释这段代码的时间 -> 复杂度。',
       `Draft Please explain the cause without editing files. -> ${NO_SUGGESTION}.`,
     ].join('\n')
@@ -79,12 +90,52 @@ export function prepareGeneration(request: GenerationRequest, history: readonly 
   return {
     operation: request.operation, system, input, request, config, protection,
     timeoutMs: request.operation === 'optimize' ? config.optimizeTimeoutMs : config.suggestionTimeoutMs,
-    maxOutputTokens: request.operation === 'optimize' ? 8192 : request.operation === 'next' ? 256 : 192,
+    // A Unicode character may require several tokens, especially for CJK and
+    // emoji. Keep the transport budget large enough for the explicit text cap.
+    maxOutputTokens: request.operation === 'optimize' ? 8192 : Math.max(request.operation === 'next' ? 128 : 96, suggestionCap * 4 + 32),
   }
+}
+
+function hasUnpairedSurrogate(text: string): boolean {
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = text.charCodeAt(++i)
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true
+    } else if (code >= 0xDC00 && code <= 0xDFFF) return true
+  }
+  return false
+}
+
+/** Remove one obvious model wrapper without stripping syntax already in the target. */
+function cleanOptimizationOutput(raw: string, prepared: PreparedGeneration): string {
+  let cleaned = raw.trim()
+  const original = prepared.protection!.original.trim()
+  const masked = prepared.protection!.masked.trim()
+  if (cleaned === masked) return cleaned
+  const fence = cleaned.match(/^```(?:markdown|prompt|text)?\r?\n([\s\S]*?)\r?\n```$/i)
+  if (fence) cleaned = fence[1].trim()
+  const preamble = /^(?:(?:好的|好的，|已为您|根据您的要求|针对您的需求|我为您)?(?:优化|改写|整理|修改|调整)后的?(?:提示词|prompt|内容|表达|文本)?(?:如下|为)?[:：\s\n]+|Here(?:'s| is) (?:the |an )?(?:optimized|improved|rewritten) (?:prompt|version)[:：\s\n]+)/i
+  const prefix = cleaned.match(preamble)?.[0]
+  if (prefix && !original.toLowerCase().startsWith(prefix.trim().toLowerCase())) cleaned = cleaned.slice(prefix.length).trim()
+  for (const [start, end] of [['"', '"'], ['“', '”'], ['`', '`']]) {
+    if (!cleaned.startsWith(start) || !cleaned.endsWith(end) || cleaned.length < 2) continue
+    const inner = cleaned.slice(start.length, -end.length).trim()
+    // Inline-code fences can already live inside one protected token. Only
+    // syntax outside the tokens needs to survive this wrapper cleanup.
+    const originalWrapped = masked.startsWith(start) && masked.endsWith(end)
+    if (!originalWrapped || inner.startsWith(start) && inner.endsWith(end)) cleaned = inner
+    break
+  }
+  return cleaned
 }
 
 export function finishGeneration(raw: string, prepared: PreparedGeneration): string | null {
   if (typeof raw !== 'string') throw new AssistantError('OUTPUT', '模型未返回有效文字')
+  if (hasUnpairedSurrogate(raw)) {
+    if (prepared.operation === 'optimize') throw new AssistantError('OUTPUT', '模型返回了不完整字符，已保留原稿')
+    return null
+  }
   const trimmed = raw.trim()
   if (!trimmed || trimmed === NO_SUGGESTION) {
     if (prepared.operation === 'optimize') throw new AssistantError('EMPTY_OUTPUT', '模型未返回优化文字，已保留原稿')
@@ -92,15 +143,20 @@ export function finishGeneration(raw: string, prepared: PreparedGeneration): str
   }
   if (prepared.operation === 'optimize') {
     if (raw.includes(NO_SUGGESTION)) throw new AssistantError('OUTPUT', '模型输出不完整，已保留原稿')
-    const output = restoreProtected(trimmed, prepared.protection!)
+    const cleaned = cleanOptimizationOutput(trimmed, prepared)
+    if (!cleaned.trim()) throw new AssistantError('EMPTY_OUTPUT', '模型未返回优化文字，已保留原稿')
+    const output = restoreProtected(cleaned, prepared.protection!)
+    if (hasUnpairedSurrogate(output)) throw new AssistantError('OUTPUT', '优化结果包含不完整字符，已保留原稿')
     if (charCount(output) > prepared.config.maxDraftChars * 2) throw new AssistantError('OUTPUT', '优化结果过长，已保留原稿')
     return output
   }
   const cap = prepared.operation === 'next' ? prepared.config.maxNextChars : prepared.config.maxCompletionChars
-  if (charCount(raw) > cap || /[\r\n]/.test(trimmed) || /^(?:```|\{\s*"|<think>|(?:建议|预测|续写|Suggestion|Prediction)\s*[:：])/i.test(trimmed) || trimmed.includes(NO_SUGGESTION)) return null
+  const allowNewlines = prepared.config.predictionDetail === 'detailed'
+  if (charCount(raw) > cap || !allowNewlines && /[\r\n]/.test(raw) || /^(?:```|\{\s*"|<think>|(?:建议|预测|续写|Suggestion|Prediction)\s*[:：])/i.test(trimmed) || trimmed.includes(NO_SUGGESTION)) return null
   if (prepared.operation === 'next') return trimmed
-  if (trimmed.startsWith(prepared.request.draft.trim()) || prepared.request.draft.endsWith(raw)) return null
-  // Avoid silently converting a UTF-16 fragment or an obvious cut-off sentence into a suggestion.
-  if (/[\uD800-\uDBFF]$/.test(raw) || /^[\uDC00-\uDFFF]/.test(raw)) return null
-  return raw.replace(/[ \t]+$/, '')
+  const draft = prepared.request.draft.trim()
+  // One or two shared letters do not establish a repeated draft: "a" +
+  // " and b" is a valid suffix. Still reject a full, substantive prefix.
+  if ((charCount(draft) >= 4 && trimmed.startsWith(draft)) || prepared.request.draft.endsWith(raw)) return null
+  return raw.replace(/\s+$/u, '')
 }

@@ -1,4 +1,4 @@
-import type { HistoryMessage } from './types'
+import type { HistoryMessage } from './types.js'
 export const charCount = (text: string): number => Array.from(text).length
 function clip(text: string, limit: number): string {
   const chars = Array.from(text)

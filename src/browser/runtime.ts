@@ -1,5 +1,5 @@
-import { InputAssistantController, type BrowserTransport, type UsageMetrics } from './controller'
-import type { AssistantConfig } from '../core/types'
+import { InputAssistantController, type BrowserTransport, type UsageMetrics, type UndoSnapshot } from './controller.js'
+import type { AssistantConfig } from '../core/types.js'
 
 export interface ConnectionFace {
   rpc: { call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<{ ok: true; value: unknown } | { ok: false; error: { code?: string; message?: string } }> }
@@ -10,12 +10,13 @@ export interface ModelDirectoryFace {
 }
 
 export class BrowserRuntime {
-  private entries = new Map<string, { controller: InputAssistantController; refs: number }>()
+  private entries = new Map<string, { controller: InputAssistantController; refs: number; waitForMutation?: () => void }>()
   private disposed = false
   private lifetime = new AbortController()
   private pendingSettings = 0
   private settingsQueue: Promise<void> = Promise.resolve()
   private metrics = new Map<string, UsageMetrics>()
+  private undo = new Map<string, { snapshot: UndoSnapshot; timer?: ReturnType<typeof setTimeout> }>()
   readonly transport: BrowserTransport
   constructor(readonly connection: ConnectionFace, readonly models?: ModelDirectoryFace) {
     this.transport = {
@@ -30,7 +31,9 @@ export class BrowserRuntime {
   controllerFor(sessionId: string): InputAssistantController {
     let entry = this.entries.get(sessionId)
     if (!entry) {
-      entry = { controller: new InputAssistantController(sessionId, this.transport, this.metrics.get(sessionId), update => this.saveSettings(update)), refs: 0 }
+      const saved = this.undo.get(sessionId)
+      clearTimeout(saved?.timer); this.undo.delete(sessionId)
+      entry = { controller: new InputAssistantController(sessionId, this.transport, this.metrics.get(sessionId), update => this.saveSettings(update), saved?.snapshot), refs: 0 }
       this.entries.set(sessionId, entry)
       if (this.pendingSettings) entry.controller.beginSettingsUpdate()
     }
@@ -38,17 +41,46 @@ export class BrowserRuntime {
   }
   retain(sessionId: string): () => void {
     const controller = this.controllerFor(sessionId), entry = this.entries.get(sessionId)!
+    entry.waitForMutation?.(); entry.waitForMutation = undefined
     entry.refs++
     controller.start()
     return () => {
       entry.refs--
       queueMicrotask(() => {
         if (entry.refs === 0 && this.entries.get(sessionId) === entry) {
-          this.metrics.set(sessionId, { ...controller.getSnapshot().metrics })
-          controller.dispose(); this.entries.delete(sessionId)
+          const release = () => {
+            if (entry.refs !== 0 || this.entries.get(sessionId) !== entry) return
+            // A durable delete/save may finish after navigation. Retain its
+            // controller until the reply supplies the actual undo snapshot.
+            if (controller.getSnapshot().busy === 'stash') {
+              entry.waitForMutation ??= controller.subscribe(() => {
+                if (controller.getSnapshot().busy !== 'stash') {
+                  entry.waitForMutation?.(); entry.waitForMutation = undefined; release()
+                }
+              })
+              return
+            }
+            this.metrics.set(sessionId, { ...controller.getSnapshot().metrics })
+            this.saveUndo(sessionId, controller.getUndoSnapshot())
+            controller.dispose(); this.entries.delete(sessionId)
+          }
+          release()
         }
       })
     }
+  }
+  private saveUndo(sessionId: string, snapshot: UndoSnapshot): void {
+    clearTimeout(this.undo.get(sessionId)?.timer); this.undo.delete(sessionId)
+    if (!snapshot.recent.length && !snapshot.pending.length) return
+    const record: { snapshot: UndoSnapshot; timer?: ReturnType<typeof setTimeout> } = { snapshot }
+    if (snapshot.recent.length && Number.isFinite(snapshot.expiresAt)) {
+      record.timer = setTimeout(() => {
+        if (this.undo.get(sessionId) !== record) return
+        record.snapshot = { ...record.snapshot, recent: [], expiresAt: 0 }
+        if (!record.snapshot.pending.length) this.undo.delete(sessionId)
+      }, Math.max(0, snapshot.expiresAt - Date.now()))
+    }
+    this.undo.set(sessionId, record)
   }
   applySettings(settings: AssistantConfig): void {
     for (const entry of this.entries.values()) entry.controller.applySettings(settings)
@@ -74,8 +106,10 @@ export class BrowserRuntime {
     if (this.disposed) return
     this.disposed = true
     this.lifetime.abort()
-    for (const entry of this.entries.values()) entry.controller.dispose()
+    for (const entry of this.entries.values()) { entry.waitForMutation?.(); entry.controller.dispose() }
     this.entries.clear()
     this.metrics.clear()
+    for (const record of this.undo.values()) clearTimeout(record.timer)
+    this.undo.clear()
   }
 }

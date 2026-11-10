@@ -22,6 +22,7 @@ function fixture(text = '请改善这段说明', automatic = false) {
   let statusFailure = false
   let delayedStatus: ReturnType<typeof deferred<AssistantStatus>> | null = null
   let delayedSave: ReturnType<typeof deferred<StoredDraft>> | null = null
+  let delayedList: ReturnType<typeof deferred<StoredDraft[]>> | null = null
   const pending: { request: GenerationRequest; signal?: AbortSignal; task: ReturnType<typeof deferred<GenerationResult>> }[] = []
   const calls: { method: string; data: unknown }[] = []
   const insertText = vi.fn((value: string, target: TokenSpan) => {
@@ -40,7 +41,7 @@ function fixture(text = '请改善这段说明', automatic = false) {
       if (method === 'status') { if (statusFailure) { statusFailure = false; throw new Error('status temporarily unavailable') }; return delayedStatus ? delayedStatus.promise as Promise<T> : status as T }
       if (method === 'generate') { const task = deferred<GenerationResult>(); pending.push({ request: data as GenerationRequest, signal, task }); return task.promise as Promise<T> }
       if (method === 'cancel') return {} as T
-      if (method === 'drafts/list') return stored as T
+      if (method === 'drafts/list') return delayedList ? delayedList.promise as Promise<T> : stored as T
       if (method === 'drafts/save') {
         if (saveFailure) throw new Error('保存失败')
         const value = data as { text: string; replaceId?: string }
@@ -49,8 +50,15 @@ function fixture(text = '请改善这段说明', automatic = false) {
         stored = [...stored.filter(item => item.id !== draft.id), draft]
         return draft as T
       }
-      if (method === 'drafts/delete') { stored = stored.filter(item => item.id !== (data as { id: string }).id); return {} as T }
-      if (method === 'drafts/clear') { stored = []; return {} as T }
+      if (method === 'drafts/delete' || method === 'drafts/clear') {
+        const removed = stored.filter(item => method === 'drafts/clear' || item.id === (data as { id: string }).id)
+        stored = stored.filter(item => !removed.includes(item)); return { drafts: stored, removed } as T
+      }
+      if (method === 'drafts/restore') {
+        if (saveFailure) throw new Error('保存失败')
+        stored = [...stored, ...(data as { drafts: StoredDraft[] }).drafts.filter(item => !stored.some(current => current.id === item.id))]
+        return stored as T
+      }
       if (method === 'settings/set') { status = { ...status, settings: { ...status.settings, ...data as object } }; return status.settings as T }
       throw new Error(`Unexpected ${method}`)
     },
@@ -75,17 +83,70 @@ function fixture(text = '请改善这段说明', automatic = false) {
   return { controller, pending, calls, insertText, update, select, editor,
     get binding() { return binding },
     setStatus: (change: Partial<AssistantStatus>) => { status = { ...status, ...change } },
+    setRoute: (route: NonNullable<BrowserBinding['route']>) => { binding = { ...binding, route }; controller.bind(binding) },
     setGeneration: (value: string | null) => { generation = value; controller.bind(binding) },
     setAttachments: () => { binding = { ...binding, input: { ...binding.input, attachmentIds: ['image'] } }; controller.bind(binding) },
     setReferences: () => { binding = { ...binding, input: { ...binding.input, occurrences: [{ offset: 0, length: 4 }] } }; controller.bind(binding) },
     failSave: () => { saveFailure = true }, delaySave: () => { delayedSave = deferred<StoredDraft>(); return delayedSave },
     failStatusOnce: () => { statusFailure = true },
     delayStatus: () => { delayedStatus = deferred<AssistantStatus>(); return delayedStatus },
-    resolve: (index: number, result: string | null) => pending[index].task.resolve({ ...pending[index].request, text: result }),
+    delayList: () => { delayedList = deferred<StoredDraft[]>(); return delayedList },
+    resolve: (index: number, result: string | null, extra: Partial<GenerationResult> = {}) => pending[index].task.resolve({ ...pending[index].request, text: result, ...extra }),
   }
 }
 
 describe('browser editor transactions', () => {
+  it('discards a preview when the user edits before accepting it', async () => {
+    const f = fixture(); await f.controller.refresh()
+    const task = f.controller.optimize(); f.resolve(0, '待采纳的优化'); await task
+    expect(f.controller.getSnapshot().preview?.text).toBe('待采纳的优化')
+    f.update('我自己的新稿')
+    expect(f.controller.applyOptimization()).toBe(false)
+    expect(f.insertText).not.toHaveBeenCalled()
+    expect(f.binding.input.draft).toBe('我自己的新稿')
+  })
+  it('dismisses a preview and explicitly cancels a request without editing the draft', async () => {
+    const f = fixture(); await f.controller.refresh()
+    const task = f.controller.optimize(); f.resolve(0, '待采纳的优化'); await task
+    f.controller.dismissOptimization()
+    expect(f.controller.getSnapshot().preview).toBeNull()
+    const pending = f.controller.optimize(); f.controller.cancelOperation()
+    expect(f.pending[1].signal?.aborted).toBe(true)
+    f.resolve(1, '取消后的迟到结果'); await pending
+    expect(f.controller.getSnapshot().preview).toBeNull()
+    expect(f.insertText).not.toHaveBeenCalled()
+  })
+  it('does not notify subscribers again for an unchanged successful status poll', async () => {
+    const f = fixture(); await f.controller.refresh()
+    const state = f.controller.getSnapshot(), listener = vi.fn()
+    const unsubscribe = f.controller.subscribe(listener)
+    await f.controller.refresh()
+    expect(f.controller.getSnapshot()).toBe(state)
+    expect(listener).not.toHaveBeenCalled(); unsubscribe()
+  })
+  it('ignores an obsolete status failure after newer settings were accepted', async () => {
+    const f = fixture(); await f.controller.refresh()
+    const pending = f.delayStatus(), refresh = f.controller.refresh()
+    await f.controller.updateSettings({ displayMode: 'panel' })
+    pending.reject(new Error('旧请求失败')); await refresh
+    expect(f.controller.getSnapshot().connected).toBe(true)
+    expect(f.controller.getSnapshot().settings.displayMode).toBe('panel')
+  })
+  it('slows hidden polling, refreshes on visibility and stops all polling on disposal', async () => {
+    vi.useFakeTimers()
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    const f = fixture(); f.controller.start(); await flush()
+    const statusCalls = () => f.calls.filter(call => call.method === 'status').length
+    expect(statusCalls()).toBe(1)
+    await vi.advanceTimersByTimeAsync(3000); expect(statusCalls()).toBe(2)
+    visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(9999); expect(statusCalls()).toBe(2)
+    await vi.advanceTimersByTimeAsync(1); expect(statusCalls()).toBe(3)
+    visibility.mockReturnValue('visible'); document.dispatchEvent(new Event('visibilitychange')); await flush()
+    expect(statusCalls()).toBe(4)
+    f.controller.dispose(); await vi.advanceTimersByTimeAsync(20000)
+    expect(statusCalls()).toBe(4)
+  })
   it('rejects an old status reply after disabling stash and does not clear a late saved draft', async () => {
     const f = fixture(); await f.controller.refresh()
     const oldStatus = f.controller.getSnapshot().status!, saved = f.delaySave()
@@ -118,7 +179,8 @@ describe('browser editor transactions', () => {
     expect(f.controller.getSnapshot().busy).toBe('optimize')
     f.resolve(0, '请说明这样修改的原因。'); await task
     expect(f.controller.getSnapshot().busy).toBeNull()
-    expect(f.controller.getSnapshot().change?.afterTarget).toBe('请说明这样修改的原因。')
+    expect(f.controller.getSnapshot().preview?.text).toBe('请说明这样修改的原因。')
+    expect(f.insertText).not.toHaveBeenCalled()
   })
   it('enforces independent optimization and stash switches without hiding saved drafts', async () => {
     const f = fixture(); await f.controller.refresh()
@@ -140,12 +202,12 @@ describe('browser editor transactions', () => {
     await vi.advanceTimersByTimeAsync(600)
     expect(f.pending[0].request.operation).toBe('complete')
     expect(f.pending[0].request.span.end).toBe(200)
-    const task = f.controller.optimize(); f.resolve(1, '改进后的表达'); await task; await flush()
+    const task = f.controller.optimize(); f.resolve(1, '改进后的表达'); await task; f.controller.applyOptimization(); await flush()
     expect(f.insertText).toHaveBeenCalledWith('改进后的表达', { start: 0, end: 200, draftRev: 1 })
   })
   it('keeps the completed diff restorable when optimization is subsequently disabled', async () => {
     const f = fixture(); await f.controller.refresh()
-    const task = f.controller.optimize(); f.resolve(0, '优化后的内容'); await task; await flush()
+    const task = f.controller.optimize(); f.resolve(0, '优化后的内容'); await task; f.controller.applyOptimization(); await flush()
     await f.controller.updateSettings({ optimizeEnabled: false })
     expect(f.controller.canRestore()).toBe(true)
     expect(f.controller.restoreOriginal()).toBe(true)
@@ -153,7 +215,10 @@ describe('browser editor transactions', () => {
   })
   it('replaces a full plain draft in a versioned edit and restores only the unchanged result', async () => {
     const f = fixture(); await f.controller.refresh()
-    const task = f.controller.optimize(); f.resolve(0, '请用简洁的语言改善这段说明'); await task; await flush()
+    const task = f.controller.optimize(); f.resolve(0, '请用简洁的语言改善这段说明'); await task
+    expect(f.binding.input.draft).toBe('请改善这段说明')
+    expect(f.insertText).not.toHaveBeenCalled()
+    expect(f.controller.applyOptimization()).toBe(true); await flush()
     expect(f.insertText).toHaveBeenCalledWith('请用简洁的语言改善这段说明', { start: 0, end: '请改善这段说明'.length, draftRev: 1 })
     expect(f.controller.canRestore()).toBe(true)
     expect(f.controller.restoreOriginal()).toBe(true); await flush()
@@ -178,7 +243,7 @@ describe('browser editor transactions', () => {
     f.resolve(0, '旧结果'); await first
     expect(f.controller.getSnapshot().busy).toBe('optimize')
     expect(f.insertText).not.toHaveBeenCalled()
-    f.resolve(1, '第二份优化结果'); await second; await flush()
+    f.resolve(1, '第二份优化结果'); await second; f.controller.applyOptimization(); await flush()
     expect(f.controller.getSnapshot().busy).toBeNull()
     expect(f.binding.input.draft).toBe('第二份优化结果')
   })
@@ -190,6 +255,7 @@ describe('browser editor transactions', () => {
   it('never falls back to a whole-draft setter when insertText rejects', async () => {
     const f = fixture(); await f.controller.refresh(); f.insertText.mockReturnValue(false)
     const task = f.controller.optimize(); f.resolve(0, '优化'); await task
+    expect(f.controller.applyOptimization()).toBe(false)
     expect(f.insertText).toHaveBeenCalledTimes(1)
     expect(f.controller.getSnapshot().change).toBeNull()
     expect(f.binding.input.draft).toBe('请改善这段说明')
@@ -197,7 +263,7 @@ describe('browser editor transactions', () => {
   it('optimizes the selected text without changing surrounding text', async () => {
     const f = fixture('前面 要优化的句子 后面'); await f.controller.refresh(); f.select(3, 9)
     const task = f.controller.optimize(); expect(f.pending[0].request.targetText).toBe('要优化的句子')
-    f.resolve(0, '更清晰的句子'); await task; await flush()
+    f.resolve(0, '更清晰的句子'); await task; f.controller.applyOptimization(); await flush()
     expect(f.binding.input.draft).toBe('前面 更清晰的句子 后面')
   })
   it('blocks full rewrites of reference-bearing drafts', async () => {
@@ -207,18 +273,18 @@ describe('browser editor transactions', () => {
   })
   it('preserves ordinary attachments during a text optimization', async () => {
     const f = fixture(); await f.controller.refresh(); f.setAttachments()
-    const task = f.controller.optimize(); f.resolve(0, '请改进说明'); await task; await flush()
+    const task = f.controller.optimize(); f.resolve(0, '请改进说明'); await task; f.controller.applyOptimization(); await flush()
     expect(f.binding.input.attachmentIds).toEqual(['image'])
   })
   it('prevents restore from overwriting later user edits', async () => {
-    const f = fixture(); await f.controller.refresh(); const task = f.controller.optimize(); f.resolve(0, '优化完成'); await task; await flush()
+    const f = fixture(); await f.controller.refresh(); const task = f.controller.optimize(); f.resolve(0, '优化完成'); await task; f.controller.applyOptimization(); await flush()
     f.update('继续写的新内容')
     expect(f.controller.canRestore()).toBe(false)
     expect(f.controller.restoreOriginal()).toBe(false)
     expect(f.binding.input.draft).toBe('继续写的新内容')
   })
   it('does not restore an old optimization across a new turn or reconnect', async () => {
-    const f = fixture(); await f.controller.refresh(); const task = f.controller.optimize(); f.resolve(0, '优化完成'); await task; await flush()
+    const f = fixture(); await f.controller.refresh(); const task = f.controller.optimize(); f.resolve(0, '优化完成'); await task; f.controller.applyOptimization(); await flush()
     f.setStatus({ sourceTurnId: 'turn-2' }); await f.controller.refresh()
     expect(f.controller.canRestore()).toBe(false)
     f.setGeneration('2')
@@ -240,6 +306,59 @@ describe('browser editor transactions', () => {
 })
 
 describe('draft persistence transactions', () => {
+  it.each(['settings', 'route'])('saves without clearing after the %s changes during persistence', async change => {
+    const f = fixture(); await f.controller.refresh(); const saved = f.delaySave(), task = f.controller.stash()
+    if (change === 'settings') {
+      await f.controller.updateSettings({ stashEnabled: false }); await f.controller.updateSettings({ stashEnabled: true })
+    } else f.setRoute({ provider: 'other', model: 'new' })
+    saved.resolve({ id: 'ignored', text: 'ignored', createdAt: 0 }); await task
+    expect(f.binding.input.draft).toBe('请改善这段说明')
+    expect(f.insertText).not.toHaveBeenCalled()
+    expect(f.controller.getSnapshot().drafts).toHaveLength(1)
+  })
+  it('cancels only clearing while a durable stash write is already pending', async () => {
+    const f = fixture(); await f.controller.refresh(); const saved = f.delaySave()
+    const task = f.controller.stash()
+    f.controller.cancelOperation()
+    expect(f.controller.getSnapshot()).toMatchObject({ busy: 'stash', stashClearCancelled: true })
+    f.controller.retrySuggestion()
+    expect(f.pending).toHaveLength(0)
+    saved.resolve({ id: 'ignored', text: 'ignored', createdAt: 0 }); await task
+    expect(f.binding.input.draft).toBe('请改善这段说明')
+    expect(f.insertText).not.toHaveBeenCalled()
+    expect(f.controller.getSnapshot()).toMatchObject({ busy: null, stashClearCancelled: false })
+    expect(f.controller.getSnapshot().drafts[0].text).toBe('请改善这段说明')
+    expect(f.controller.getSnapshot().notice).toContain('按取消要求保留')
+  })
+  it('does not let an old list response resurrect a deleted draft', async () => {
+    const f = fixture(); await f.controller.refresh(); await f.controller.stash(); await flush()
+    const saved = f.controller.getSnapshot().drafts[0]
+    const pending = f.delayList(), refresh = f.controller.refreshDrafts()
+    await f.controller.clearDrafts(); pending.resolve([saved]); await refresh
+    expect(f.controller.getSnapshot().drafts).toEqual([])
+    expect(f.controller.getSnapshot().deletedDrafts).toEqual([saved])
+  })
+  it('undoes deletion with original draft identity while leaving the input unchanged', async () => {
+    vi.useFakeTimers(); const f = fixture(); await f.controller.refresh(); await f.controller.stash(); await flush()
+    const saved = f.controller.getSnapshot().drafts[0]
+    f.update('新的当前输入')
+    await f.controller.clearDrafts()
+    expect(f.controller.getSnapshot().drafts).toEqual([])
+    expect(f.controller.getSnapshot().deletedDrafts).toEqual([saved])
+    await f.controller.undoDeleteDrafts()
+    expect(f.controller.getSnapshot().drafts).toEqual([saved])
+    expect(f.controller.getSnapshot().deletedDrafts).toEqual([])
+    expect(f.binding.input.draft).toBe('新的当前输入')
+  })
+  it('expires the undo buffer and preserves it when a restore fails', async () => {
+    vi.useFakeTimers(); const f = fixture(); await f.controller.refresh(); await f.controller.stash(); await flush()
+    await f.controller.clearDrafts(); await vi.advanceTimersByTimeAsync(10000)
+    expect(f.controller.getSnapshot().deletedDrafts).toEqual([])
+    f.update('第二份草稿'); await f.controller.stash(); await flush(); await f.controller.clearDrafts()
+    f.failSave(); await f.controller.undoDeleteDrafts()
+    expect(f.controller.getSnapshot().pendingUndoDrafts).toHaveLength(1)
+    expect(f.controller.getSnapshot().notice).toContain('保存失败')
+  })
   it('keeps the original draft on persistence failure', async () => {
     const f = fixture(); await f.controller.refresh(); f.failSave(); await f.controller.stash()
     expect(f.insertText).not.toHaveBeenCalled()
@@ -271,6 +390,115 @@ describe('draft persistence transactions', () => {
 })
 
 describe('shared suggestion scheduling', () => {
+  it('never dispatches a manual suggestion during IME composition', async () => {
+    const f = fixture('正在组合的文字', false); await f.controller.refresh()
+    f.controller.setComposing(true); f.controller.retrySuggestion()
+    expect(f.pending).toHaveLength(0)
+    expect(f.binding.input.draft).toBe('正在组合的文字')
+  })
+  it('clears manual request state when an edit or composition interrupts it', async () => {
+    const f = fixture('第一份草稿', false); await f.controller.refresh()
+    f.controller.retrySuggestion(); f.update('用户的新草稿')
+    f.resolve(0, '旧结果'); await flush()
+    expect(f.controller.getSnapshot().busy).toBeNull()
+    expect(f.controller.getSnapshot().suggestionStatus).not.toBe('generating')
+    f.controller.retrySuggestion(); f.controller.setComposing(true)
+    f.resolve(1, '又一个旧结果'); await flush()
+    expect(f.controller.getSnapshot().busy).toBeNull()
+    expect(f.controller.getSnapshot().suggestion).toBeNull()
+    expect(f.insertText).not.toHaveBeenCalled()
+  })
+  it('supports a single explicit retry with automatic suggestions disabled', async () => {
+    vi.useFakeTimers(); const f = fixture('请解释原因', false); await f.controller.refresh()
+    f.controller.retrySuggestion()
+    expect(f.pending[0].request.manual).toBe(true)
+    f.pending[0].task.reject(new Error('provider failure')); await flush()
+    for (let i = 0; i < 3; i++) { await f.controller.refresh(); await vi.advanceTimersByTimeAsync(3000) }
+    expect(f.pending).toHaveLength(1)
+    expect(f.controller.getSnapshot().suggestionStatus).toBe('failed')
+    f.controller.retrySuggestion(); f.resolve(1, '并给出例子。'); await flush()
+    expect(f.controller.acceptSuggestion()).toBe(true); await flush()
+    expect(f.binding.input.draft).toBe('请解释原因并给出例子。')
+  })
+  it('explicitly retries an abstained next prediction without an automatic loop', async () => {
+    const f = fixture('', true); await f.controller.refresh(); f.resolve(0, null); await flush()
+    f.controller.retrySuggestion()
+    expect(f.pending[1].request).toMatchObject({ operation: 'next', manual: true })
+    f.resolve(1, null); await flush(); await f.controller.refresh()
+    expect(f.pending).toHaveLength(2)
+    expect(f.controller.getSnapshot().suggestionStatus).toBe('abstained')
+  })
+  it('preserves one deferred manual retry across polls and stops if it is throttled again', async () => {
+    vi.useFakeTimers(); const f = fixture('请解释', false); await f.controller.refresh()
+    f.controller.retrySuggestion(); f.resolve(0, null, { outcome: 'throttled', retryAfterMs: 5000 }); await flush()
+    for (let i = 0; i < 5; i++) { await f.controller.refresh(); await vi.advanceTimersByTimeAsync(900) }
+    expect(f.pending).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(f.pending).toHaveLength(2)
+    expect(f.pending[1].request.manual).toBe(true)
+    f.resolve(1, null, { outcome: 'throttled', retryAfterMs: 5000 }); await flush()
+    await f.controller.refresh(); await vi.advanceTimersByTimeAsync(10000)
+    expect(f.pending).toHaveLength(2)
+    expect(f.controller.getSnapshot().suggestionStatus).toBe('throttled')
+  })
+  it('cancels queued and in-flight automatic suggestions when the page is hidden', async () => {
+    vi.useFakeTimers(); const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    const f = fixture('请解释', true); f.controller.start(); await flush()
+    visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(1000); expect(f.pending).toHaveLength(0)
+    visibility.mockReturnValue('visible'); document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(600); expect(f.pending).toHaveLength(1)
+    visibility.mockReturnValue('hidden'); document.dispatchEvent(new Event('visibilitychange'))
+    expect(f.pending[0].signal?.aborted).toBe(true)
+    f.resolve(0, '迟到建议'); await flush()
+    expect(f.controller.getSnapshot().suggestion).toBeNull()
+  })
+  it('uses distinct request ids in independent controllers even in the same millisecond', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1800000000000)
+    const first = fixture('第一份'); await first.controller.refresh()
+    const second = fixture('第二份'); await second.controller.refresh()
+    const a = first.controller.optimize(), b = second.controller.optimize()
+    expect(first.pending[0].request.requestId).not.toBe(second.pending[0].request.requestId)
+    first.resolve(0, null); second.resolve(0, null); await Promise.all([a, b])
+  })
+  it('retries throttled completion at the host deadline instead of caching it as abstention', async () => {
+    vi.useFakeTimers(); const f = fixture('请解释这段代码的时间', true)
+    f.setStatus({ settings: { ...DEFAULT_CONFIG, debounceMs: 200, minIntervalMs: 500 } })
+    await f.controller.refresh(); await vi.advanceTimersByTimeAsync(200)
+    f.resolve(0, null, { outcome: 'throttled', retryAfterMs: 1200 }); await flush()
+    await f.controller.refresh(); await vi.advanceTimersByTimeAsync(1199)
+    expect(f.pending).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(f.pending).toHaveLength(2)
+    f.resolve(1, '复杂度。', { outcome: 'suggestion' }); await flush()
+    expect(f.controller.getSnapshot().suggestion?.text).toBe('复杂度。')
+  })
+  it('keeps true model abstention cached without automatic repeated calls', async () => {
+    vi.useFakeTimers(); const f = fixture('请解释', true)
+    await f.controller.refresh(); await vi.advanceTimersByTimeAsync(600)
+    f.resolve(0, null, { outcome: 'abstained' }); await flush()
+    await f.controller.refresh(); await vi.advanceTimersByTimeAsync(10000)
+    expect(f.pending).toHaveLength(1)
+  })
+  it('keeps the visible cached suggestion stable across unchanged status polls', async () => {
+    vi.useFakeTimers(); const f = fixture('请解释', true)
+    await f.controller.refresh(); await vi.advanceTimersByTimeAsync(600)
+    f.resolve(0, '原因。'); await flush()
+    const state = f.controller.getSnapshot(), listener = vi.fn()
+    f.controller.subscribe(listener)
+    await f.controller.refresh()
+    expect(f.controller.getSnapshot()).toBe(state)
+    expect(listener).not.toHaveBeenCalled()
+  })
+  it('allows a failed next prediction to recover after the auxiliary model changes', async () => {
+    const f = fixture('', true); await f.controller.refresh()
+    f.pending[0].task.reject(new Error('MODEL')); await flush()
+    await f.controller.refresh(); expect(f.pending).toHaveLength(1)
+    await f.controller.updateSettings({ provider: 'other', model: 'ready' })
+    expect(f.pending).toHaveLength(2)
+    f.resolve(1, '请继续解释'); await flush()
+    expect(f.controller.getSnapshot().suggestion?.text).toBe('请继续解释')
+  })
   it.each([200, 600, 900, 1000, 2000, 5000])('arms completion once when debounceMs=%i exceeds the 900ms status poll', async debounceMs => {
     vi.useFakeTimers()
     const f = fixture('请解释这段代码的时间', true)
@@ -322,7 +550,7 @@ describe('shared suggestion scheduling', () => {
   it('lets manual optimization cancel an in-flight completion', async () => {
     vi.useFakeTimers(); const f = fixture('请把', true); await f.controller.refresh(); await vi.advanceTimersByTimeAsync(600)
     const task = f.controller.optimize(); expect(f.pending[0].signal?.aborted).toBe(true)
-    f.resolve(0, '旧续写'); f.resolve(1, '请把方案合并进去'); await task; await flush()
+    f.resolve(0, '旧续写'); f.resolve(1, '请把方案合并进去'); await task; f.controller.applyOptimization(); await flush()
     expect(f.controller.getSnapshot().suggestion).toBeNull()
     expect(f.insertText).toHaveBeenCalledTimes(1)
   })

@@ -5,23 +5,29 @@ import { Session, type SessionId } from '@deepseek-ai/dsh-session'
 import { BlockAssembler, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type {} from '@deepseek-ai/dsh-typert-registry'
-import { AssistantError, SessionScheduler, prepareGeneration, finishGeneration, type AssistantConfig, type AssistantStatus, type GenerationRequest, type GenerationResult, type ModelRoute } from '../core/index'
-import { AssistantStorage } from './storage'
-import { emptyTranscript } from './transcript'
-import type { RpcPayload } from './rpc'
+import type {} from '@deepseek-ai/dsh-api-session-controller'
+import { AssistantError, SessionScheduler, prepareGeneration, finishGeneration, type AssistantConfig, type AssistantStatus, type GenerationRequest, type GenerationResult, type ModelRoute } from '../core/index.js'
+import { charCount } from '../core/context.js'
+import type { AssistantModelCatalog } from '../core/models.js'
+import { AssistantStorage, draftSchema } from './storage.js'
+import { emptyTranscript } from './transcript.js'
+import type { RpcPayload } from './rpc.js'
 
 const stringId = z.string().min(1).max(300)
 const sessionRequest = z.object({ sessionId: stringId })
+// User-facing budgets count Unicode code points; the UTF-16 cap separately bounds transport work.
+const inputText = z.string().max(64_000).refine(value => charCount(value) <= 32_000)
 const generationRequest: z.ZodType<GenerationRequest> = z.object({
   requestId: stringId, sessionId: stringId, operation: z.enum(['optimize', 'next', 'complete']),
   sourceTurnId: z.string().nullable(), draft: z.string().max(128_000), draftRev: z.number().int().nonnegative(),
   span: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative(), draftRev: z.number().int().nonnegative() }),
   connectionGeneration: stringId, routeKey: z.string().max(1000),
-  targetText: z.string().max(32_000).optional(), lockedFragments: z.array(z.string().min(1).max(32_000)).max(100).optional(),
+  targetText: inputText.optional(), lockedFragments: z.array(inputText.refine(value => value.length > 0)).max(100).optional(),
   provider: z.string().max(200).optional(), model: z.string().max(200).optional(),
+  manual: z.boolean().optional(),
 })
 
-interface SessionRuntime { generation: string; lastNextTurn: string | null; lastCompletionAt: number }
+interface SessionRuntime { generation: string; nextTurn: string | null; nextRoutes: Set<string>; lastCompletionAt: number }
 
 export class AssistantHostRuntime {
   private readonly mount = randomUUID()
@@ -33,7 +39,7 @@ export class AssistantHostRuntime {
   private state(session: Session): SessionRuntime {
     let state = this.instances.get(session)
     if (!state) {
-      state = { generation: `${this.mount}:${randomUUID()}`, lastNextTurn: null, lastCompletionAt: 0 }
+      state = { generation: `${this.mount}:${randomUUID()}`, nextTurn: null, nextRoutes: new Set(), lastCompletionAt: -Infinity }
       this.instances.set(session, state)
     }
     return state
@@ -73,8 +79,29 @@ export class AssistantHostRuntime {
     }
   }
 
-  private result(request: GenerationRequest, text: string | null): GenerationResult {
-    return { text, requestId: request.requestId, sessionId: request.sessionId, sourceTurnId: request.sourceTurnId,
+  async models(signal: AbortSignal): Promise<AssistantModelCatalog> {
+    signal.throwIfAborted()
+    if (this.disposed) throw new AssistantError('DISPOSED', '输入助手已停用')
+    const directory = this.ctx.get('sessionController')
+    if (!directory) throw new AssistantError('MODEL_CATALOG', '当前宿主未提供模型目录，请使用手动填写')
+    // The published global catalog does not resolve an Agent, select a model or generate text.
+    const catalog = await directory.modelCatalog()
+    signal.throwIfAborted()
+    if (this.disposed) throw new AssistantError('DISPOSED', '输入助手已停用')
+    return {
+      groups: catalog.groups.map(group => ({ provider: group.id, name: group.name,
+        models: group.models.filter(model => model.id.length > 0 && model.id.length <= 200)
+          .map(model => ({ id: model.id, name: model.name })) }))
+        .filter(group => group.provider.length > 0 && group.provider.length <= 200 && group.models.length > 0),
+      // Provider diagnostics can include private details; advertise only the failed provider identity.
+      failures: catalog.failures.map(failure => ({ provider: failure.id, name: failure.name })),
+    }
+  }
+
+  private result(request: GenerationRequest, text: string | null, retryAfterMs?: number): GenerationResult {
+    return { text, outcome: retryAfterMs === undefined ? text === null ? 'abstained' : 'suggestion' : 'throttled',
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+      requestId: request.requestId, sessionId: request.sessionId, sourceTurnId: request.sourceTurnId,
       draftRev: request.draftRev, span: { ...request.span }, connectionGeneration: request.connectionGeneration, routeKey: request.routeKey }
   }
 
@@ -105,24 +132,30 @@ export class AssistantHostRuntime {
     const state = this.state(session)
     const transcript = this.transcript(session)
     if (request.operation === 'next') {
-      if (!settings.nextEnabled || transcript.running || request.sourceTurnId === null || request.draft.length > 0
-        || state.lastNextTurn === request.sourceTurnId) return this.result(request, null)
-      state.lastNextTurn = request.sourceTurnId
+      if ((!request.manual && !settings.nextEnabled) || transcript.running || request.sourceTurnId === null || request.draft.length > 0) return this.result(request, null)
     } else if (request.operation === 'complete') {
       // A first-draft request and a just-started turn can both have a null
       // sourceTurnId. Check live running state as well as snapshot identity so
       // an RPC arriving after turn/start cannot spend an auxiliary call.
-      if (!settings.completionEnabled || transcript.running) return this.result(request, null)
-      const now = Date.now()
-      if (now - state.lastCompletionAt < settings.minIntervalMs) return this.result(request, null)
-      state.lastCompletionAt = now
+      if ((!request.manual && !settings.completionEnabled) || transcript.running) return this.result(request, null)
     }
     const fallback = this.sessionRoute(session)
     const provider = settings.provider || request.provider || fallback?.provider
     const model = settings.model || request.model || fallback?.model
     if (!provider || !model) throw new AssistantError('MODEL', '请先在 DSH 输入框选择可用模型，或在输入助手设置辅助模型')
+    // Deduplicate completed predictions by the route actually used, including a
+    // fixed auxiliary model. Failed or cancelled attempts remain recoverable.
+    const actualRoute = JSON.stringify([provider, model])
+    if (request.operation === 'next') {
+      if (state.nextTurn !== request.sourceTurnId) { state.nextTurn = request.sourceTurnId; state.nextRoutes.clear() }
+      if (!request.manual && state.nextRoutes.has(actualRoute)) return this.result(request, null)
+    } else if (request.operation === 'complete') {
+      const retryAfterMs = settings.minIntervalMs - (Date.now() - state.lastCompletionAt)
+      if (retryAfterMs > 0) return this.result(request, null, retryAfterMs)
+    }
     const prepared = prepareGeneration(request, transcript.entries, settings)
     const text = await this.scheduler.run(request.sessionId, request.requestId, request.operation, prepared.timeoutMs, async active => {
+      if (request.operation === 'complete') state.lastCompletionAt = Date.now()
       const call = await this.ctx.llm.prepareCall({ provider, model, maxTokens: prepared.maxOutputTokens }, active, (controls, info) => {
         // All three operations are short, auxiliary text tasks. Select the
         // adapter's lowest advertised effort rather than inheriting a costly
@@ -151,6 +184,10 @@ export class AssistantHostRuntime {
       return finishGeneration(raw, prepared)
     }, signal)
     this.current(request, session)
+    if (request.operation === 'next') {
+      if (state.nextRoutes.size >= 512) state.nextRoutes.clear()
+      state.nextRoutes.add(actualRoute)
+    }
     return this.result(request, text)
   }
 
@@ -162,6 +199,7 @@ export class AssistantHostRuntime {
     signal.throwIfAborted()
     switch (payload.method) {
       case 'generate': return this.generate(payload.data, signal)
+      case 'models/list': return this.models(signal)
       case 'settings/get': return this.storage.settings()
       case 'settings/set': {
         const patch = z.record(z.string(), z.unknown()).parse(payload.data) as Partial<AssistantConfig>
@@ -185,7 +223,7 @@ export class AssistantHostRuntime {
         return this.storage.list(request.sessionId)
       }
       case 'drafts/save': {
-        const request = z.object({ sessionId: stringId, text: z.string().max(32_000), replaceId: stringId.optional() }).parse(payload.data)
+        const request = z.object({ sessionId: stringId, text: inputText, replaceId: stringId.optional() }).parse(payload.data)
         await this.session(request.sessionId, signal)
         if (!(await this.storage.settings()).stashEnabled) {
           throw new AssistantError('DISABLED', '草稿暂存已关闭，请在输入助手设置中启用；已有草稿仍可查看或删除')
@@ -201,6 +239,11 @@ export class AssistantHostRuntime {
         const request = sessionRequest.parse(payload.data)
         await this.session(request.sessionId, signal)
         return this.storage.delete(request.sessionId)
+      }
+      case 'drafts/restore': {
+        const request = z.object({ sessionId: stringId, drafts: z.array(draftSchema).max(3) }).parse(payload.data)
+        await this.session(request.sessionId, signal)
+        return this.storage.restore(request.sessionId, request.drafts)
       }
     }
   }

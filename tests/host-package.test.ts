@@ -4,7 +4,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, type GenerateOptions, type LlmResolvedModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { TypertGatewayService } from '@deepseek-ai/dsh-api-gateway'
 import { Peer } from '@deepseek-ai/dsh-client-connection'
 import type { Domain, DomainSpec } from '@deepseek-ai/dsh-storage-domain'
@@ -14,7 +14,17 @@ import { gunzipSync } from 'node:zlib'
 import { randomUUID } from 'node:crypto'
 import { dirname, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import type { AssistantStatus, StoredDraft } from '../src/core/types'
+import type { AssistantStatus, GenerationResult, StoredDraft } from '../src/core/types'
+
+class PackedAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = []
+  async resolveModel(provider: string, id: string): Promise<LlmResolvedModelInfo> { return { provider, id, name: 'Packed local fixture' } }
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
+    yield { type: 'text-delta', index: 0, text: '请说明缓存机制。' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
 
 /** Only the external medium is replaced; Loader, Gateway and plugin are published code. */
 class PersistentFixtureMedium extends Service {
@@ -86,14 +96,16 @@ describe.skipIf(!existsSync(archive))('published .tgz through the official Loade
     new SessionStore(ctx)
     new SessionProjectionRegistry(ctx)
     new PersistentFixtureMedium(ctx)
-    new LlmRuntime(ctx)
+    const llm = new LlmRuntime(ctx), adapter = new PackedAdapter()
+    llm.registerAdapter(['fixture'], adapter)
     const gateway = new TypertGatewayService(ctx, {})
     const peer = new Peer(ctx, { principal: { kind: 'owner' } })
     // Loader installs its isolation hooks in a child fiber. Await its normal
     // plugin lifecycle before creating entries, as the actual application does.
     await ctx.plugin(Loader, { baseUrl: pathToFileURL(packedRoot + sep).href }).await()
     const loader = ctx.loader
-    const id = await loader.create({ name: pkg.name, config: { displayMode: 'panel' } })
+    const id = await loader.create({ name: pkg.name, config: { displayMode: 'panel', predictionDetail: 'detailed',
+      maxNextChars: 1000, maxCompletionChars: 500, provider: 'fixture', model: 'packed-auxiliary' } })
     await loader.await()
     await loader.resolve(id).fiber?.await()
     expect(ctx.get('inputAssistant')).toBeDefined()
@@ -102,7 +114,18 @@ describe.skipIf(!existsSync(archive))('published .tgz through the official Loade
       namespace: 'input-assistant', method: 'call', args: { payload: { method, data } }, peer,
     }) as T
     const before = await call<AssistantStatus>('status', { sessionId: session.id })
-    expect(before.settings.displayMode).toBe('panel')
+    expect(before.settings).toMatchObject({ displayMode: 'panel', predictionDetail: 'detailed',
+      maxNextChars: 1000, maxCompletionChars: 500, provider: 'fixture', model: 'packed-auxiliary' })
+    const draft = '解释缓存', sequence = session.seq, header = session.requestHeader()
+    expect(await call<GenerationResult>('generate', { operation: 'optimize', requestId: 'packed-route', sessionId: session.id,
+      draft, targetText: draft, draftRev: 1, span: { start: 0, end: draft.length, draftRev: 1 },
+      sourceTurnId: before.sourceTurnId, connectionGeneration: before.generation,
+      provider: 'fixture', model: 'composer-primary', routeKey: JSON.stringify(['fixture', 'composer-primary']),
+    })).toMatchObject({ text: '请说明缓存机制。', outcome: 'suggestion' })
+    expect(adapter.requests).toHaveLength(1)
+    expect(adapter.requests[0].model).toBe('packed-auxiliary')
+    expect(session.seq).toBe(sequence)
+    expect(session.requestHeader()).toEqual(header)
     const drafts = await call<StoredDraft[]>('drafts/save', { sessionId: session.id, text: '安装包中的草稿 😀\n第二行' })
     await call('settings/set', { nextEnabled: false })
     await loader.update(id, { disabled: true })
@@ -114,7 +137,8 @@ describe.skipIf(!existsSync(archive))('published .tgz through the official Loade
     await loader.resolve(id).fiber?.await()
     expect(await call('drafts/list', { sessionId: session.id })).toEqual(drafts)
     const after = await call<AssistantStatus>('status', { sessionId: session.id })
-    expect(after.settings.nextEnabled).toBe(false)
+    expect(after.settings).toMatchObject({ nextEnabled: false, predictionDetail: 'detailed',
+      maxNextChars: 1000, maxCompletionChars: 500, provider: 'fixture', model: 'packed-auxiliary' })
     expect(after.generation).not.toBe(before.generation)
     loader.remove(id)
     await loader.await()

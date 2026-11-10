@@ -4,10 +4,10 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { AssistantOverlay, AssistantRight } from './components'
-import { BrowserRuntime, type ConnectionFace, type ModelDirectoryFace } from './runtime'
-import { STYLE_TEXT } from './styles'
-import { AssistantSettings } from './settings'
+import { AssistantOverlay, AssistantRight } from './components.js'
+import { BrowserRuntime, type ConnectionFace, type ModelDirectoryFace } from './runtime.js'
+import { STYLE_TEXT } from './styles.js'
+import { AssistantSettings } from './settings.js'
 
 export const name = 'input-assistant.client'
 export const inject = ['slots', 'connection', 'modelDirectories']
@@ -38,4 +38,4 @@ export function apply(ctx: Context): void {
   }, AssistantSettings))
 }
 
-export { BrowserRuntime, InputAssistantController } from './public'
+export { BrowserRuntime, InputAssistantController } from './public.js'

@@ -1,8 +1,8 @@
-import { AssistantError, DEFAULT_CONFIG, type AssistantConfig } from './types'
+import { AssistantError, DEFAULT_CONFIG, type AssistantConfig } from './types.js'
 
 const numeric: Record<string, [number, number]> = {
   debounceMs: [200, 5000], minIntervalMs: [500, 30000], maxHistoryChars: [1000, 64000],
-  maxDraftChars: [100, 32000], maxNextChars: [20, 300], maxCompletionChars: [10, 200],
+  maxDraftChars: [100, 32000], maxNextChars: [20, 1000], maxCompletionChars: [10, 500],
   optimizeTimeoutMs: [1000, 120000], suggestionTimeoutMs: [1000, 60000],
 }
 const booleans = ['optimizeEnabled', 'stashEnabled', 'nextEnabled', 'completionEnabled'] as const
@@ -15,6 +15,7 @@ function validate(config: AssistantConfig): AssistantConfig {
   }
   if (!['ghost', 'panel'].includes(config.displayMode)) throw new AssistantError('CONFIG', '显示方式必须是 ghost 或 panel')
   if (!['light', 'standard', 'deep'].includes(config.optimizationStrength)) throw new AssistantError('CONFIG', '优化强度必须是 light、standard 或 deep')
+  if (!['concise', 'standard', 'detailed'].includes(config.predictionDetail)) throw new AssistantError('CONFIG', '预测详略度必须是 concise、standard 或 detailed')
   for (const [key, [min, max]] of Object.entries(numeric)) {
     const value = config[key as keyof AssistantConfig]
     if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
@@ -52,13 +53,18 @@ export function resolveStoredConfig(input: unknown): AssistantConfig {
   const record = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {}
   const config: Record<string, unknown> = { ...DEFAULT_CONFIG }
   for (const key of Object.keys(DEFAULT_CONFIG) as (keyof AssistantConfig)[]) {
+    if (key === 'provider' || key === 'model') continue
     if (!(key in record)) continue
     const value = record[key]
     const candidate = { ...DEFAULT_CONFIG, [key]: value } as AssistantConfig
     try { validate({ ...candidate }) } catch { continue }
     config[key] = typeof value === 'string' ? value.trim() : value
   }
-  // `provider`/`model` are only valid as a pair; a half-filled pair falls back to follow-the-composer.
-  if (Boolean(config.provider) !== Boolean(config.model)) { config.provider = ''; config.model = '' }
+  // Route fields depend on each other: validating them separately against the
+  // empty defaults would discard every valid fixed model.
+  try {
+    const route = validate({ ...DEFAULT_CONFIG, provider: record.provider ?? '', model: record.model ?? '' } as AssistantConfig)
+    config.provider = route.provider; config.model = route.model
+  } catch { /* Invalid or half-filled routes follow the composer. */ }
   return config as unknown as AssistantConfig
 }

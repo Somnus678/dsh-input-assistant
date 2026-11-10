@@ -9,8 +9,8 @@ import { DEFAULT_CONFIG, type AssistantConfig, type GenerationRequest } from '..
 const runtimes: BrowserRuntime[] = []
 afterEach(() => { cleanup(); runtimes.splice(0).forEach(runtime => runtime.dispose()); document.body.innerHTML = '' })
 
-function settingsFixture() {
-  let settings: AssistantConfig = { ...DEFAULT_CONFIG, nextEnabled: false, completionEnabled: false }
+function settingsFixture(failInitialLoad = false, initial: Partial<AssistantConfig> = {}, failCatalog = false) {
+  let settings: AssistantConfig = { ...DEFAULT_CONFIG, nextEnabled: false, completionEnabled: false, ...initial }
   let failure = false
   let generation = { id: 1 }
   let finishSave: ((value: unknown) => void) | undefined
@@ -21,7 +21,17 @@ function settingsFixture() {
     generation: { getSnapshot: () => generation, subscribe: () => () => {} },
     rpc: { call: vi.fn(async (_channel, _endpoint, envelope, signal) => {
       const { method, data } = (envelope as { args: { payload: { method: string; data: any } } }).args.payload
-      if (method === 'settings/get') return { ok: true as const, value: settings }
+      if (method === 'settings/get') {
+        if (failInitialLoad) { failInitialLoad = false; return { ok: false as const, error: { message: '存储暂时无法打开' } } }
+        return { ok: true as const, value: settings }
+      }
+      if (method === 'models/list') {
+        if (failCatalog) return { ok: false as const, error: { message: '目录连接暂时不可用' } }
+        return { ok: true as const, value: {
+          groups: [{ provider: 'local', name: '本地提供商', models: [{ id: 'small', name: '快速小模型' }] }],
+          failures: [{ provider: 'offline', name: '暂时离线提供商' }],
+        } }
+      }
       if (method === 'settings/set') {
         setters.push(data)
         if (failure) return { ok: false as const, error: { message: '连接响应丢失' } }
@@ -38,10 +48,92 @@ function settingsFixture() {
   const runtime = new BrowserRuntime(connection); runtimes.push(runtime)
   render(<AssistantSettings {...{ runtime, close() {} } as ComponentProps<typeof AssistantSettings>} />)
   return { runtime, setters, generates, settings: () => settings, fail: () => { failure = true }, delay: () => { delayed = true },
-    finish: () => finishSave?.({}), reconnect: () => { generation = { id: generation.id + 1 } } }
+    finish: () => finishSave?.({}), reconnect: () => { generation = { id: generation.id + 1 } }, recoverCatalog: () => { failCatalog = false } }
 }
 
 describe('DSH input assistant settings section', () => {
+  it('applies a preset to the form only and saves its global values after review', async () => {
+    const f = settingsFixture()
+    await waitFor(() => expect(screen.queryByText('正在加载设置…')).toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: '敏捷模式' }))
+    expect((screen.getByLabelText('预测详略度') as HTMLSelectElement).value).toBe('concise')
+    expect((screen.getByLabelText('续写停顿（毫秒）') as HTMLInputElement).value).toBe('300')
+    expect(f.setters).toHaveLength(0)
+    expect(f.generates).toHaveLength(0)
+    expect(f.settings().predictionDetail).toBe('standard')
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }))
+    await screen.findByText('设置已保存并生效')
+    expect(f.setters).toEqual([{ debounceMs: 300, minIntervalMs: 1000, optimizationStrength: 'light', predictionDetail: 'concise', maxNextChars: 60, maxCompletionChars: 40 }])
+    expect(f.generates).toHaveLength(0)
+  })
+  it('keeps valid expanded prediction limits editable without changing numeric precision', async () => {
+    const f = settingsFixture(false, { maxNextChars: 800, maxCompletionChars: 450, debounceMs: 601 })
+    await waitFor(() => expect(screen.queryByText('正在加载设置…')).toBeNull())
+    const next = screen.getByLabelText('下一句长度上限（字符）') as HTMLInputElement
+    const completion = screen.getByLabelText('续写长度上限（字符）') as HTMLInputElement
+    const debounce = screen.getByLabelText('续写停顿（毫秒）') as HTMLInputElement
+    expect(next.max).toBe('1000'); expect(completion.max).toBe('500')
+    expect(next.validity.valid).toBe(true); expect(completion.validity.valid).toBe(true); expect(debounce.validity.valid).toBe(true)
+    fireEvent.change(screen.getByLabelText('预测详略度'), { target: { value: 'detailed' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }))
+    await screen.findByText('设置已保存并生效')
+    expect(f.setters).toEqual([{ predictionDetail: 'detailed' }])
+    expect(f.settings()).toMatchObject({ maxNextChars: 800, maxCompletionChars: 450, debounceMs: 601 })
+  })
+  it('can discard an unsaved preset without changing global settings or making a generation', async () => {
+    const f = settingsFixture()
+    await waitFor(() => expect(screen.queryByText('正在加载设置…')).toBeNull())
+    fireEvent.click(screen.getByRole('button', { name: '节流省流' }))
+    expect((screen.getByLabelText('续写请求最小间隔（毫秒）') as HTMLInputElement).value).toBe('5000')
+    fireEvent.click(screen.getByRole('button', { name: '放弃修改' }))
+    expect((screen.getByLabelText('续写请求最小间隔（毫秒）') as HTMLInputElement).value).toBe('2000')
+    expect(f.setters).toHaveLength(0); expect(f.generates).toHaveLength(0)
+  })
+  it('loads grouped auxiliary choices without a session and saves only after review', async () => {
+    const f = settingsFixture()
+    await screen.findByRole('option', { name: '快速小模型' })
+    expect(screen.getByText(/部分提供商目录加载失败/).textContent).toContain('暂时离线提供商')
+    fireEvent.change(screen.getByLabelText('辅助模型选择'), { target: { value: JSON.stringify(['local', 'small']) } })
+    expect(f.setters).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }))
+    await screen.findByText('设置已保存并生效')
+    expect(f.setters).toEqual([{ provider: 'local', model: 'small' }])
+    const controller = f.runtime.controllerFor('a'); await controller.refresh()
+    expect(controller.getSnapshot().status?.route).toEqual({ provider: 'mock', model: 'fast' })
+    expect(controller.getSnapshot().settings).toMatchObject({ provider: 'local', model: 'small' })
+  })
+  it('preserves an unavailable saved model until the user explicitly chooses another route', async () => {
+    const f = settingsFixture(false, { provider: 'old-provider', model: 'old-model' })
+    const option = await screen.findByRole('option', { name: /当前手动选择／目录未列出：old-provider \/ old-model/ })
+    expect((screen.getByLabelText('辅助模型选择') as HTMLSelectElement).value).toBe(option.getAttribute('value'))
+    expect(f.settings()).toMatchObject({ provider: 'old-provider', model: 'old-model' })
+    fireEvent.change(screen.getByLabelText('辅助模型选择'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }))
+    await screen.findByText('设置已保存并生效')
+    expect(f.setters).toEqual([{ provider: '', model: '' }])
+  })
+  it('keeps manual settings editable when the catalog fails and can reload it', async () => {
+    const f = settingsFixture(false, {}, true)
+    await screen.findByText('模型目录：目录连接暂时不可用')
+    fireEvent.change(screen.getByLabelText('提供商'), { target: { value: 'custom' } })
+    fireEvent.change(screen.getByLabelText('模型'), { target: { value: 'private-model' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存设置' }))
+    await screen.findByText('设置已保存并生效')
+    expect(f.settings()).toMatchObject({ provider: 'custom', model: 'private-model' })
+    f.recoverCatalog(); fireEvent.click(screen.getByRole('button', { name: '刷新模型列表' }))
+    await screen.findByRole('option', { name: '快速小模型' })
+    expect(screen.queryByText('模型目录：目录连接暂时不可用')).toBeNull()
+    expect(f.settings()).toMatchObject({ provider: 'custom', model: 'private-model' })
+  })
+  it('retries a failed initial settings load without requiring the page to close', async () => {
+    settingsFixture(true)
+    expect((await screen.findByRole('alert')).textContent).toContain('存储暂时无法打开')
+    expect(screen.getByLabelText('提示词优化').closest('fieldset')?.disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '重新加载' }))
+    await waitFor(() => expect(screen.getByLabelText('提示词优化').closest('fieldset')?.disabled).toBe(false))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: '重新加载' })).toBeNull()
+  })
   it('does not overwrite another switch changed after the settings page was opened', async () => {
     const f = settingsFixture()
     await waitFor(() => expect(screen.queryByText('正在加载设置…')).toBeNull())
