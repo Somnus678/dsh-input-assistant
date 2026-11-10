@@ -105,7 +105,7 @@ describe.skipIf(!existsSync(archive))('published .tgz through the official Loade
     await ctx.plugin(Loader, { baseUrl: pathToFileURL(packedRoot + sep).href }).await()
     const loader = ctx.loader
     const id = await loader.create({ name: pkg.name, config: { displayMode: 'panel', predictionDetail: 'detailed',
-      maxNextChars: 1000, maxCompletionChars: 500, provider: 'fixture', model: 'packed-auxiliary' } })
+      maxNextChars: 300, maxCompletionChars: 200, provider: 'fixture', model: 'packed-auxiliary' } })
     await loader.await()
     await loader.resolve(id).fiber?.await()
     expect(ctx.get('inputAssistant')).toBeDefined()
@@ -115,7 +115,7 @@ describe.skipIf(!existsSync(archive))('published .tgz through the official Loade
     }) as T
     const before = await call<AssistantStatus>('status', { sessionId: session.id })
     expect(before.settings).toMatchObject({ displayMode: 'panel', predictionDetail: 'detailed',
-      maxNextChars: 1000, maxCompletionChars: 500, provider: 'fixture', model: 'packed-auxiliary' })
+      maxNextChars: 300, maxCompletionChars: 200, provider: 'fixture', model: 'packed-auxiliary' })
     const draft = '解释缓存', sequence = session.seq, header = session.requestHeader()
     expect(await call<GenerationResult>('generate', { operation: 'optimize', requestId: 'packed-route', sessionId: session.id,
       draft, targetText: draft, draftRev: 1, span: { start: 0, end: draft.length, draftRev: 1 },
@@ -138,7 +138,7 @@ describe.skipIf(!existsSync(archive))('published .tgz through the official Loade
     expect(await call('drafts/list', { sessionId: session.id })).toEqual(drafts)
     const after = await call<AssistantStatus>('status', { sessionId: session.id })
     expect(after.settings).toMatchObject({ nextEnabled: false, predictionDetail: 'detailed',
-      maxNextChars: 1000, maxCompletionChars: 500, provider: 'fixture', model: 'packed-auxiliary' })
+      maxNextChars: 300, maxCompletionChars: 200, provider: 'fixture', model: 'packed-auxiliary' })
     expect(after.generation).not.toBe(before.generation)
     loader.remove(id)
     await loader.await()

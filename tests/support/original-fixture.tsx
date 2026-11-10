@@ -41,11 +41,13 @@ const actions = { captureInsertion, persistDraft() {}, insertText(text: string, 
   return true
 } }
 let core: any, plugin: any, runtime: any, settings: any, settingsRoot: ReturnType<typeof createRoot> | undefined
+let turnId: string | null = '1'
 let drafts: { id: string; text: string; createdAt: number }[] = []
 const requests: any[] = []
 const requestTimes: number[] = []
 let delay = 30, rawOutput: string | null = null, echoTarget = false, failOnce = false, throttleMs = 0
 let saveGate: Promise<void> | undefined, releaseSave: (() => void) | undefined
+let statusGate: Promise<void> | undefined, releaseStatus: (() => void) | undefined, failStatus = false
 const connection = {
   generation: { getSnapshot: () => ({ id: 1 }), subscribe: () => () => {} },
   rpc: { async call(_channel: string, _endpoint: string, envelope: any) {
@@ -53,7 +55,10 @@ const connection = {
     let value: any
     try {
       switch (method) {
-        case 'status': value = { sourceTurnId: '1', running: false, generation: 'packaged-host', settings: core.resolveStoredConfig(settings), route: { provider: 'fixture', model: 'main' } }; break
+        case 'status':
+          if (statusGate) await statusGate
+          if (failStatus) { failStatus = false; throw new Error('delayed status failure') }
+          value = { sourceTurnId: turnId, running: false, generation: 'packaged-host', settings: core.resolveStoredConfig(settings), route: { provider: 'fixture', model: 'main' } }; break
         case 'settings/get': value = core.resolveStoredConfig(settings); break
         case 'settings/set': settings = core.resolveConfig({ ...core.resolveStoredConfig(settings), ...data }); value = settings; break
         case 'models/list': value = { groups: [{ provider: 'fixture', name: 'Fixture', models: [{ id: 'main', name: 'Main' }, { id: 'auxiliary', name: 'Auxiliary' }] }], failures: [] }; break
@@ -115,7 +120,10 @@ Object.assign(window, { __ModuleLoader__: { load(module: any) {
 } } })
 const fixture = {
   mount(actualCore: any) {
-    core = actualCore; settings = { ...core.DEFAULT_CONFIG, nextEnabled: false, completionEnabled: false }
+    const params = new URLSearchParams(location.search)
+    if (params.has('noTurn')) turnId = null
+    core = actualCore; settings = { ...core.DEFAULT_CONFIG, nextEnabled: params.has('auto'), completionEnabled: params.has('auto'), debounceMs: 200, minIntervalMs: 500 }
+    if (params.has('draft')) { setDraft('已有草稿'); element.focus() }
     plugin.apply(ctx)
     for (const [slot, id] of [['conversation.input.right', 'right'], ['conversation.input.overlay', 'overlay']]) {
       const { options, Component } = registered.get(slot)!, injection = options.inject(); runtime = injection.runtime
@@ -127,6 +135,9 @@ const fixture = {
   async config(update: any) { await runtime.saveSettings(update); await runtime.controllerFor('package-smoke').refresh() },
   focus() { element.focus(); editor.update(() => $getRoot().selectEnd(), { discrete: true }) },
   setDelay(ms: number) { delay = ms }, output(text: string) { rawOutput = text }, echoTarget() { echoTarget = true },
+  async setTurn(id: string | null) { turnId = id; await runtime.controllerFor('package-smoke').refresh() },
+  deferStatusFailure() { failStatus = true; statusGate = new Promise(resolve => { releaseStatus = resolve }) },
+  releaseStatus() { releaseStatus?.(); statusGate = undefined },
   failNext() { failOnce = true }, throttleOnce(ms: number) { throttleMs = ms },
   deferSave() { saveGate = new Promise(resolve => { releaseSave = resolve }) }, releaseSave() { releaseSave?.(); saveGate = undefined },
   drafts: () => drafts, mainRoute: () => current.current,

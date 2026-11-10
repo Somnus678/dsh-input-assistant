@@ -1,6 +1,6 @@
 {
   "name": "dsh-input-assistant",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "DSH 输入助手：提示词优化、下一句预测、输入续写与当前会话草稿暂存",
   "type": "module",
   "license": "MIT",
@@ -47,6 +47,7 @@
     "docs/references.md",
     "docs/smoke-comparison.md",
     "docs/validation.md",
+    "docs/source-restoration.md",
     "docs/images"
   ],
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "client": { "inject": ["@deepseek-ai/dsh-client-ui-conversation", "@deepseek-ai/dsh-client-ui-model-selection", "@deepseek-ai/dsh-client-ui-settings"], "platform": "web" } },
@@ -54,11 +55,11 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm typecheck && pnpm build && pnpm test",
     "pack:release": "pnpm typecheck && pnpm build && pnpm pack --pack-destination dist && pnpm test && pnpm test:package",
     "test:package": "node scripts/verify-package.mjs",
-    "test:package:web": "node scripts/smoke-package.mjs",
-    "test:web": "node scripts/smoke-web.mjs",
+    "test:package:web": "node scripts/smoke-original.mjs --package",
+    "test:web": "node scripts/smoke-original.mjs",
     "eval:validate": "node scripts/evaluate.mjs validate",
     "eval:export": "node scripts/evaluate.mjs export",
     "eval:score": "node scripts/evaluate.mjs score"

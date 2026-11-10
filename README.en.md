@@ -2,99 +2,59 @@
 
 [简体中文](README.md) | English
 
-An input assistant for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): rewrite drafts, suggest the next message or a continuation, and save drafts for later. Suggestions are never sent automatically.
-
-The current source version is **0.1.4**. Build this checkout to install it locally, and check [Releases](https://github.com/Somnus678/dsh-input-assistant/releases) for published GitHub packages.
-
-![Optimization preview](docs/images/optimize.png)
-
-Screenshots use the production components and host theme in a local browser fixture with simulated model output.
+Version 0.1.5 is based on the user-supplied original 0.1.4 package. Its original interface, settings, and direct-write interactions are retained; targeted reliability fixes have been applied. The separately published 0.1.4 was a different build that changed the interface.
 
 ## Features
 
-- **Prompt optimization:** rewrite the whole draft or a selection with light, standard, or deep intensity. Review the diff and explicitly accept it; undo or restore the original afterward.
-- **Predictions and completion:** show a candidate after a completed response or continue the current draft. Press Tab to accept, or Esc to dismiss. The independent Predict button also works when automatic suggestions are disabled; failed requests can be retried explicitly.
-- **Detail and presets:** concise, standard, and detailed suggestions respect the configured character limit. Detailed suggestions can contain multiple lines and use a scrollable panel. Presets change the form and take effect only after saving.
-- **Drafts:** save up to three drafts per session, then explicitly restore, append, copy, or delete them. Deletion has a ten-second undo window. During saving, Cancel clear keeps the editor contents while the save finishes.
-- **Auxiliary model:** choose a model from the host catalog or enter provider and model IDs manually. This affects the plugin's calls only; it does not switch the main conversation model.
+- **Optimize:** rewrite the current draft or selection and insert the result immediately. Inspect changes or restore the original from the menu.
+- **Predict:** the manual button inserts the prediction immediately. Automatic predictions can be shown as ghost text or in a panel and accepted with Tab.
+- **Save drafts:** choose the save-and-clear action in the menu; each session stores up to three drafts for explicit restoration.
+- **Settings:** choose detail level, presets, display mode, and a fixed auxiliary provider/model. Settings are global; the auxiliary route does not switch the conversation model.
 
-Recognized code, URLs, paths, and explicitly selected fragments are protected during rewriting. Altered or missing protection markers cause the result to be rejected. Automatic recognition and marker preservation do not guarantee semantic correctness: review the preview, and quote or manually protect ambiguous paths and filenames.
+Automatic suggestions are enabled by default and use the configured model. Drafts and settings are stored by the host. Model providers receive the relevant draft and conversation context. Review model output before sending it.
 
-## Requirements and installation
+Entering or returning to a conversation, or loading an existing draft, does not by itself start a prediction. Automatic suggestions remain controlled by the original settings after real user input or a new response.
 
-Node.js **22.19 or later** and DeepSeek Harness are required. The declared DSH range is `>=0.2.1-rc.2 <0.3.0-0`; this build's dependency tests use `0.2.1-rc.3`. The complete native host and every version in that range have not been tested.
+The package declares Node.js 22.19+ and DSH `>=0.2.1-rc.2 <0.3.0-0`. The local checks use simulated model outputs and do not establish real-model quality, native operating-system IME behavior, or complete desktop/plugin compatibility. The original archive lacked browser TypeScript source; see [source restoration](docs/source-restoration.md).
 
-Build from this checkout:
+## Install
+
+Build the current source with Node.js 22.19+ and pnpm:
 
 ```powershell
 pnpm install --frozen-lockfile
 pnpm build
 pnpm pack --pack-destination dist
+dsh plugin --profile web add (Resolve-Path './dist/dsh-input-assistant-0.1.5.tgz').Path
 ```
 
-Install the local package into a Web profile:
-
-```powershell
-dsh --version
-dsh plugin --profile web add (Resolve-Path './dist/dsh-input-assistant-0.1.4.tgz').Path
-dsh --profile web --dump-config
-dsh --profile web
-```
-
-For the Windows desktop profile, use the CLI bundled with the desktop application:
+For Windows desktop, use the CLI bundled with the desktop application and its `desktop` profile:
 
 ```powershell
 $dsh = Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
-& $dsh plugin --profile desktop add (Resolve-Path './dist/dsh-input-assistant-0.1.4.tgz').Path
+& $dsh plugin --profile desktop add (Resolve-Path './dist/dsh-input-assistant-0.1.5.tgz').Path
 ```
 
-Completely quit and restart the relevant DSH instance after installation or upgrade. To remove the Web plugin, run `dsh plugin --profile web remove dsh-input-assistant` and restart. Uninstalling does not remove saved plugin settings or drafts from host storage.
+Completely quit and restart the relevant DSH instance after installation or upgrade. Published artifacts are available from [GitHub Releases](https://github.com/Somnus678/dsh-input-assistant/releases).
 
-If another archive was previously installed under the same 0.1.4 version, verify its source and SHA256 and check the plugin files actually loaded after restart. A same-version cache can reuse old files; the version number alone does not confirm that the new build was loaded.
+## Settings and original behavior
 
-## Getting started and settings
+The switches, optimization strength, prediction detail, display mode, and auxiliary model settings apply globally. Presets modify the settings form and take effect on save. Automatic next-message prediction and completion are enabled by default. Manual prediction inserts its result directly, even when automatic suggestions are disabled.
 
-After restarting, use **Optimize** or **Predict** next to the input, and open the assistant menu for draft operations. Full settings are under **Settings → Input Assistant** and apply to all conversations. Labels in the current interface are in Chinese.
+Detailed mode retains the original length expansion: a next-message limit of 120 or less is treated as 400, and a completion limit of 80 or less is treated as 200. Character budgets are measured in Unicode code points. During a save-and-clear operation, cancellation preserves the editor contents even if the save completes.
 
-Automatic next-message prediction and completion are **enabled by default** and invoke the configured model. Disable both in settings if you only want explicit requests. Optimization and draft saving are also enabled by default.
-
-| Setting | Default | Range / choices |
-|---|---:|---|
-| Optimization intensity | Standard | Light, standard, deep |
-| Prediction detail | Standard | Concise, standard, detailed |
-| Display | Ghost | Ghost text or panel; detailed mode uses the panel |
-| Next-message limit | 120 | 20–1000 Unicode characters |
-| Completion limit | 80 | 10–500 Unicode characters |
-| Completion debounce | 600 ms | 200–5000 ms |
-| Minimum completion interval | 2000 ms | 500–30000 ms |
-| Auxiliary model | Follow composer | Catalog selection or provider/model pair |
-
-Manual suggestions require an idle, visible, connected plain-text composer without attachments or references, with the caret at the end. The host's minimum interval still applies; a throttled manual request is delayed at most once. Hiding the page suppresses automatic suggestions. During draft saving, edits, model changes, or settings changes preserve the current editor contents and save only the original snapshot.
-
-## Privacy and limitations
-
-The plugin does not collect telemetry. Drafts and settings are stored by DSH; model calls go through the provider configured in the host. Draft text and relevant context are sent to that provider for optimization and suggestions. The plugin does not store API keys. See [SECURITY.md](SECURITY.md) for reporting and privacy details.
-
-The 60-case model quality evaluation remains `not_evaluated`; a six-call historical smoke comparison does not establish comparative quality. Native operating-system IME composition, full desktop and other-plugin combinations, and non-Windows platforms have not been verified for this build. Consult [validation](docs/validation.md) and [the small model comparison](docs/smoke-comparison.md) for the actual evidence and its limits.
-
-## Development and verification
+## Validation and development
 
 ```powershell
-pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm build
 pnpm pack --pack-destination dist
-pnpm test                 # full suite, including Edge theme tests
-pnpm test:package         # strict consumers and actual archive
-pnpm test:web             # source components in Edge
-pnpm test:package:web     # archive client/core in Edge, local RPC fixture
-pnpm eval:validate
+pnpm test
+pnpm test:package
+pnpm test:web
+pnpm test:package:web
 ```
 
-Edge browser tests require Microsoft Edge. The package browser fixture uses local model and RPC replacements; the official Loader/Gateway tests cover the host integration separately. Linux CI excludes Edge-only tests. See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and [CHANGELOG.md](CHANGELOG.md) for release notes.
+The last two commands require Microsoft Edge. They exercise the original interface and its actual archive with a local RPC and simulated model output; Loader and Gateway tests cover host integration separately. The fixed 60-case real-model quality set remains unevaluated.
 
-Pushing a `v*` tag triggers the npm publishing workflow after CI and requires the repository's `NPM_TOKEN`. It does not create a GitHub Release; create one separately and attach the validated archive if GitHub downloads are desired. Confirm that the tag, package version, and archive match and that the version has not already been published.
-
-## License
-
-[MIT](LICENSE). Third-party dependencies and reference implementations retain their own licenses; see [references](docs/references.md).
+See [README.md](README.md), [validation](docs/validation.md), and [LICENSE](LICENSE).

@@ -17,14 +17,13 @@ export const Config = schema.object({
   optimizeEnabled: schema.boolean().default(true), stashEnabled: schema.boolean().default(true),
   optimizationStrength: schema.union(['light', 'standard', 'deep']).default('standard'),
   nextEnabled: schema.boolean().default(true), completionEnabled: schema.boolean().default(true),
-  predictionDetail: schema.union(['concise', 'standard', 'detailed']).default('standard'),
   displayMode: schema.union(['ghost', 'panel']).default('ghost'),
   debounceMs: schema.natural().min(200).max(5000).default(600),
   minIntervalMs: schema.natural().min(500).max(30000).default(2000),
   maxHistoryChars: schema.natural().min(1000).max(64000).default(16000),
   maxDraftChars: schema.natural().min(100).max(32000).default(8000),
-  maxNextChars: schema.natural().min(20).max(1000).default(120),
-  maxCompletionChars: schema.natural().min(10).max(500).default(80),
+  maxNextChars: schema.natural().min(20).max(300).default(120),
+  maxCompletionChars: schema.natural().min(10).max(200).default(80),
   optimizeTimeoutMs: schema.natural().min(1000).max(120000).default(60000),
   suggestionTimeoutMs: schema.natural().min(1000).max(60000).default(15000),
   provider: schema.string().default(''), model: schema.string().default(''),
@@ -64,8 +63,6 @@ export function apply(ctx: Context, config: Config = {}): void {
     if (opened) return opened
     const attempt = Promise.resolve().then(() => ctx.storageDomain.open(createDomainSpec(initial)))
     opened = attempt
-    // Keep one shared open in flight, but do not cache a transient failure for
-    // the rest of this plugin mount. A later user action or status read can retry.
     void attempt.catch(() => { if (opened === attempt) opened = undefined })
     return attempt
   }

@@ -18,13 +18,6 @@ function fixture() {
 }
 
 describe('session-isolated durable drafts', () => {
-  it('counts Unicode code points consistently when saving and restoring drafts', async () => {
-    const storage = fixture().create(), text = '😀'.repeat(20000)
-    const saved = await storage.save('emoji', text)
-    const removed = await storage.delete('emoji')
-    expect(await storage.restore('emoji', removed.removed)).toEqual(saved)
-    expect(() => storage.save('emoji', '😀'.repeat(32001))).toThrow(/32,000/)
-  })
   it('serializes concurrent initial saves and enforces the three-draft cap', async () => {
     const storage = fixture().create()
     const results = await Promise.allSettled(['a', 'b', 'c', 'd'].map(text => storage.save('session-a', text)))
@@ -57,39 +50,6 @@ describe('session-isolated durable drafts', () => {
     await storage.updateSettings({ displayMode: 'panel', nextEnabled: false })
     await expect(storage.updateSettings({ debounceMs: 0 })).rejects.toMatchObject({ code: 'CONFIG' })
     expect(await f.create().settings()).toMatchObject({ displayMode: 'panel', nextEnabled: false, debounceMs: 600 })
-  })
-
-  it('returns the actual deletion snapshots and restores their original identities and timestamps', async () => {
-    const storage = fixture().create()
-    await storage.save('a', 'first')
-    const before = await storage.save('a', 'second')
-    const cleared = await storage.delete('a')
-    expect(cleared).toEqual({ drafts: [], removed: before })
-    expect(await storage.restore('a', cleared.removed)).toEqual(before)
-    expect(await storage.list('b')).toEqual([])
-  })
-
-  it('refuses an overflowing undo atomically and permits a retry after capacity is freed', async () => {
-    const storage = fixture().create()
-    const original = await storage.save('a', 'first')
-    await storage.save('a', 'second'); await storage.save('a', 'third')
-    const removed = await storage.delete('a', original[0]!.id)
-    const live = await storage.save('a', 'new draft')
-    await expect(storage.restore('a', removed.removed)).rejects.toMatchObject({ code: 'DRAFT_LIMIT' })
-    expect(await storage.list('a')).toEqual(live)
-    await storage.delete('a', live[2]!.id)
-    expect(await storage.restore('a', removed.removed)).toHaveLength(3)
-    expect((await storage.list('a')).find(draft => draft.id === original[0]!.id)).toEqual(original[0])
-  })
-
-  it('merges concurrent undo attempts without duplicates or overwriting a later replacement', async () => {
-    const storage = fixture().create()
-    const saved = await storage.save('a', 'old text')
-    const removed = await storage.delete('a', saved[0]!.id)
-    await Promise.all([storage.restore('a', removed.removed), storage.restore('a', removed.removed)])
-    expect(await storage.list('a')).toEqual(saved)
-    const replacement = await storage.save('a', 'changed in another client', saved[0]!.id)
-    expect(await storage.restore('a', removed.removed)).toEqual(replacement)
   })
 })
 

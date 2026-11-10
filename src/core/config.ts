@@ -60,11 +60,9 @@ export function resolveStoredConfig(input: unknown): AssistantConfig {
     try { validate({ ...candidate }) } catch { continue }
     config[key] = typeof value === 'string' ? value.trim() : value
   }
-  // Route fields depend on each other: validating them separately against the
-  // empty defaults would discard every valid fixed model.
   try {
     const route = validate({ ...DEFAULT_CONFIG, provider: record.provider ?? '', model: record.model ?? '' } as AssistantConfig)
     config.provider = route.provider; config.model = route.model
-  } catch { /* Invalid or half-filled routes follow the composer. */ }
+  } catch { /* An invalid pair follows the composer. */ }
   return config as unknown as AssistantConfig
 }

@@ -198,40 +198,23 @@ export class AssistantHostRuntime {
   async invoke(payload: RpcPayload, signal: AbortSignal): Promise<unknown> {
     signal.throwIfAborted()
     switch (payload.method) {
-      case 'generate': return this.generate(payload.data, signal)
-      case 'models/list': return this.models(signal)
-      case 'settings/get': return this.storage.settings()
-      case 'settings/set': {
-        const patch = z.record(z.string(), z.unknown()).parse(payload.data) as Partial<AssistantConfig>
-        const result = await this.storage.updateSettings(patch)
-        // Settings feed prompt construction, output caps and request intervals, so
-        // every in-flight auxiliary request was built from a now-obsolete config.
-        // Cancel them all; each settles with CANCELLED and the draft is preserved.
-        // This is deliberately broader than cancelling only the changed module.
-        this.scheduler.cancelAll()
-        return result
-      }
       case 'status': return this.status(sessionRequest.parse(payload.data).sessionId, signal)
+      case 'models/list': return this.models(signal)
+      case 'generate': return this.generate(payload.data, signal)
       case 'cancel': {
         const request = z.object({ sessionId: stringId, requestId: stringId.optional() }).parse(payload.data)
-        await this.session(request.sessionId, signal)
         return { cancelled: this.cancel(request.sessionId, request.requestId) }
       }
-      case 'drafts/list': {
-        const request = sessionRequest.parse(payload.data)
-        await this.session(request.sessionId, signal)
-        return this.storage.list(request.sessionId)
-      }
+      case 'drafts/list': return this.storage.list(sessionRequest.parse(payload.data).sessionId)
       case 'drafts/save': {
+        const settings = await this.storage.settings()
+        if (!settings.stashEnabled) throw new AssistantError('DISABLED', '草稿暂存已关闭，请在输入助手设置中启用')
         const request = z.object({ sessionId: stringId, text: inputText, replaceId: stringId.optional() }).parse(payload.data)
         await this.session(request.sessionId, signal)
-        if (!(await this.storage.settings()).stashEnabled) {
-          throw new AssistantError('DISABLED', '草稿暂存已关闭，请在输入助手设置中启用；已有草稿仍可查看或删除')
-        }
         return this.storage.save(request.sessionId, request.text, request.replaceId)
       }
       case 'drafts/delete': {
-        const request = z.object({ sessionId: stringId, id: stringId }).parse(payload.data)
+        const request = z.object({ sessionId: stringId, id: stringId.optional() }).parse(payload.data)
         await this.session(request.sessionId, signal)
         return this.storage.delete(request.sessionId, request.id)
       }
@@ -244,6 +227,12 @@ export class AssistantHostRuntime {
         const request = z.object({ sessionId: stringId, drafts: z.array(draftSchema).max(3) }).parse(payload.data)
         await this.session(request.sessionId, signal)
         return this.storage.restore(request.sessionId, request.drafts)
+      }
+      case 'settings/get': return this.storage.settings()
+      case 'settings/set': {
+        const settings = await this.storage.updateSettings(payload.data as Partial<AssistantConfig>)
+        this.scheduler.cancelAll()
+        return settings
       }
     }
   }

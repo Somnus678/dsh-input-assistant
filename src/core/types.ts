@@ -4,6 +4,7 @@ export interface TokenSpan { start: number; end: number; draftRev: number }
 export interface ModelRoute { provider: string; model: string }
 export type OptimizationStrength = 'light' | 'standard' | 'deep'
 export type PredictionDetail = 'concise' | 'standard' | 'detailed'
+
 export interface AssistantConfig {
   optimizeEnabled: boolean
   stashEnabled: boolean
@@ -23,13 +24,27 @@ export interface AssistantConfig {
   provider: string
   model: string
 }
+
 export const DEFAULT_CONFIG: Readonly<AssistantConfig> = Object.freeze({
-  optimizeEnabled: true, stashEnabled: true, optimizationStrength: 'standard',
-  nextEnabled: true, completionEnabled: true, predictionDetail: 'standard', displayMode: 'ghost',
-  debounceMs: 600, minIntervalMs: 2000, maxHistoryChars: 16000,
-  maxDraftChars: 8000, maxNextChars: 120, maxCompletionChars: 80,
-  optimizeTimeoutMs: 60000, suggestionTimeoutMs: 15000, provider: '', model: '',
+  optimizeEnabled: true,
+  stashEnabled: true,
+  optimizationStrength: 'standard',
+  nextEnabled: true,
+  completionEnabled: true,
+  predictionDetail: 'standard',
+  displayMode: 'ghost',
+  debounceMs: 600,
+  minIntervalMs: 2000,
+  maxHistoryChars: 16000,
+  maxDraftChars: 8000,
+  maxNextChars: 120,
+  maxCompletionChars: 80,
+  optimizeTimeoutMs: 60000,
+  suggestionTimeoutMs: 15000,
+  provider: '',
+  model: '',
 })
+
 export interface InputSnapshot {
   requestId: string
   sessionId: string
@@ -40,6 +55,7 @@ export interface InputSnapshot {
   connectionGeneration: string
   routeKey: string
 }
+
 export interface GenerationRequest extends InputSnapshot {
   operation: Operation
   /** Explicit user action; automatic feature toggles do not block a single manual suggestion. */
@@ -49,6 +65,7 @@ export interface GenerationRequest extends InputSnapshot {
   provider?: string
   model?: string
 }
+
 export interface GenerationResult {
   text: string | null
   /** Temporary throttling is not a model abstention and must never be cached as one. */
@@ -62,7 +79,9 @@ export interface GenerationResult {
   connectionGeneration: string
   routeKey: string
 }
+
 export interface HistoryMessage { role: 'user' | 'assistant'; text: string; turnId?: string }
+
 export interface AssistantStatus {
   sourceTurnId: string | null
   running: boolean
@@ -70,10 +89,13 @@ export interface AssistantStatus {
   generation: string
   route?: ModelRoute
 }
+
 export interface StoredDraft { id: string; text: string; createdAt: number }
 export interface DraftMutationResult { drafts: StoredDraft[]; removed: StoredDraft[] }
+
 export const RPC_CHANNEL = '/api'
 export const RPC_PREFIX = 'input-assistant/'
+
 export class AssistantError extends Error {
   constructor(public readonly code: string, message: string) { super(message); this.name = 'AssistantError' }
 }

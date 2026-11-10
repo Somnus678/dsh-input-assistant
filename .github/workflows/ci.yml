@@ -20,7 +20,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # Full suite on Windows: the only environment where every test can run.
   #
-  # tests/browser-theme.test.ts and scripts/smoke-web.mjs launch
+  # scripts/smoke-original.mjs launches
   # `chromium.launch({ channel: 'msedge' })`, i.e. the real Microsoft Edge that
   # ships with Windows. They are genuine rendering tests against the published
   # DSH theme, so they must not be skipped or mocked on the platform that can
@@ -105,7 +105,7 @@ jobs:
   # (no Edge), and the coverage of that exclusion is provided by test-windows.
   # ---------------------------------------------------------------------------
   test-linux:
-    name: Test (Linux, Node ${{ matrix.node }}, excluding Edge-only tests)
+    name: Test (Linux, Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -139,8 +139,8 @@ jobs:
       - name: Verify packaged artifact
         run: pnpm test:package
 
-      - name: Test (excluding Edge-only rendering tests)
-        run: pnpm vitest run --exclude 'tests/browser-theme.test.ts'
+      - name: Test
+        run: pnpm test
 
       - name: Validate evaluation fixtures
         run: pnpm eval:validate

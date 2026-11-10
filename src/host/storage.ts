@@ -66,14 +66,13 @@ export class AssistantStorage {
     })
   }
 
-  delete(sessionId: string, id?: string): Promise<DraftMutationResult> {
+  delete(sessionId: string, id?: string): Promise<StoredDraft[]> {
     return this.transaction(async domain => {
       const current = domain.table('drafts').get(sessionId)?.drafts ?? []
       const drafts = id === undefined ? [] : current.filter(draft => draft.id !== id)
-      const removed = id === undefined ? current : current.filter(draft => draft.id === id)
       if (drafts.length === 0) await domain.table('drafts').delete(sessionId)
       else await domain.table('drafts').put(sessionId, { version: 1, drafts })
-      return { drafts: drafts.map(draft => ({ ...draft })), removed: removed.map(draft => ({ ...draft })) }
+      return drafts.map(draft => ({ ...draft }))
     })
   }
 
